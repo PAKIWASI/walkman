@@ -2,6 +2,7 @@
 package walkman
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
@@ -25,12 +26,16 @@ type walkStats struct {
 	maxDepth uint32
 }
 
+type WalkResult struct {
+	d fs.DirEntry
+	err error
+}
+
 type Walkman struct {
 	conf  walkConf
 	stats walkStats
-	wsp.LFdeque[string]
+	pool wsp.WorkerPool[string, WalkResult]
 }
-
 
 func readDir(name string) ([]fs.DirEntry, error) {
 	// The main path opener. works for both files and directories
@@ -43,6 +48,20 @@ func readDir(name string) ([]fs.DirEntry, error) {
 	dirs, err := f.ReadDir(-1)
 	return dirs, err
 }
+
+func NewWalkman() *Walkman {
+	return &Walkman{
+		pool: wsp.NewWorkerPool(context.Background(), 16, 8, 0,
+			func(ctx context.Context, item string, spawn func(string)) (result *WalkResult, err error) {
+
+			}),
+	}
+}
+
+func (w *Walkman) Walk(root string) {
+
+}
+
 
 
 
