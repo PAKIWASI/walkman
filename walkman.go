@@ -1,4 +1,5 @@
-package main
+// Package walkman
+package walkman
 
 import (
 	"fmt"
@@ -6,15 +7,10 @@ import (
 	"os"
 )
 
-// dynamic scheduling?
-// Work stealing is the fancier version: each worker has its own local queue (cheap, no contention on the common case),
-// and only reaches into another worker's queue when its own is empty.
-
-
 type walkConf struct {
 	followLinks bool
-	sortOutput  bool
-	bfs         bool
+	sortOutput  bool // our worker pool does not give us this, this will have to be another layer on top
+	bfs         bool // this too
 	maxDepth    uint32
 	skipList    []string
 }
