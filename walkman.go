@@ -28,7 +28,7 @@ type walkStats struct {
 type Walkman struct {
 	conf  walkConf
 	stats walkStats
-	wsp.LFdeque
+	wsp.LFdeque[string]
 }
 
 
@@ -46,30 +46,8 @@ func readDir(name string) ([]fs.DirEntry, error) {
 
 
 
-func (w *Walkman) WalkDir(root string) (<-chan fs.DirEntry, error) {
-	dirs, err := readDir(root)
-	if err != nil {
-		return nil, err
-	}
-}
 
 func main() {
 
-	// w := Walkman{conf: walkConf{
-	// 	followLinks: true,
-	// 	sortOutput:  true,
-	// 	maxDepth:    100,
-	// 	skipList:    []string{".git"},
-	// }}
-
-	path := "/home/wasi/Documents/projects/go/walker"
-	d, err := readDir(path)
-	if err != nil {
-		fmt.Println("error reading: ", err)
-	}
-
-	for _, dd := range d {
-		fmt.Println(dd)
-	}
 
 }
