@@ -3,6 +3,7 @@ package walkman
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -63,7 +64,7 @@ func NewWalkman(followLinks bool, maxDepth uint32, skipList []string) Walkman {
 		},
 		// TODO: set pool size etc based on GOMAXPROCS and other stuff after seeing the
 		// performance differences in the benchmarks
-		pool: wsp.NewWorkerPool(context.WithValue(context.Background(), ctxSkipList, skipList), 8, 8, 0,
+		pool: wsp.NewWorkerPool(context.Background(), 8, 8, 0,
 			// TODO: how can i (legally) put context to more use?
 			func(ctx context.Context, item string, spawn func(string)) (result *WalkResult, err error) {
 				f, err := os.Open(item)
@@ -76,26 +77,32 @@ func NewWalkman(followLinks bool, maxDepth uint32, skipList []string) Walkman {
 				if err != nil {
 					return nil, err
 				}
-				
-				for i := range dirs {
-					if slices.Contains(ctx.Value(ctxSkipList), dirs[i].Name()) {
 
-					}
+				dirs = slices.DeleteFunc(dirs, func(d fs.DirEntry) bool {
+					return slices.Contains(skipList, d.Name())
+				})
+
+				for i := range dirs {
 					if dirs[i].IsDir() {
 						spawn(filepath.Join(item, dirs[i].Name()))
 					}
 				}
-				filepath.WalkDir(root string, fn fs.WalkDirFunc)
-				// TODO: skipping dirs?
+
 				return &WalkResult{ret: dirs, err: nil}, nil
 			}),
 	}
 }
 
-func (w *Walkman) Walk(root string) {
+func (w *Walkman) Walk(root string) <-chan WalkResult {
 
+	w.pool.Submit(root)
+	ret := w.pool.Run()
+
+	go func() {
+		err := w.pool.Wait()
+		fmt.Println(err)
+	}()
+
+	return ret
 }
 
-func main() {
-
-}
