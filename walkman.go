@@ -12,6 +12,15 @@ import (
 	wsp "github.com/PAKIWASI/workstealpool"
 )
 
+// TODO:
+// NOW: 
+// 1. max depth stuff
+// 2. sorting, bfs
+// 3. the TODOs scattered around
+// LATER:
+// 1. iterator support
+
+
 type walkConf struct {
 	followLinks bool
 	// sortOutput  bool // our worker pool does not give us this, this will have to be another layer on top
@@ -81,6 +90,8 @@ func NewWalkman(followLinks bool, maxDepth uint32, skipList []string) Walkman {
 				dirs = slices.DeleteFunc(dirs, func(d fs.DirEntry) bool {
 					return slices.Contains(skipList, d.Name())
 				})
+				
+				// TODO: recovrable erros like permission denied?
 
 				for i := range dirs {
 					if dirs[i].IsDir() {
