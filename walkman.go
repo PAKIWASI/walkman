@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+
+	wsp "github.com/PAKIWASI/workstealpool"
 )
 
 type walkConf struct {
@@ -26,6 +28,7 @@ type walkStats struct {
 type Walkman struct {
 	conf  walkConf
 	stats walkStats
+	wsp.LFdeque
 }
 
 
