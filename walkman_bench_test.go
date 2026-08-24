@@ -182,3 +182,85 @@ func BenchmarkWalk_TrackStats(b *testing.B) {
 		}
 	})
 }
+
+// buildSyntheticTree builds a deterministic, depth x breadth directory
+// tree once (outside the timed loop) and returns its root. Unlike
+// benchRoot()'s default of walking "/", this gives every run - on any
+// machine, any permissions, any real-world filesystem clutter - the
+// exact same shape and file count, so results are comparable across
+// commits/machines instead of being an artifact of whatever happens to
+// be mounted at "/" that day.
+func buildSyntheticTree(b *testing.B, depth, breadth int) string {
+	b.Helper()
+	root := b.TempDir()
+
+	var build func(dir string, level int)
+	build = func(dir string, level int) {
+		// A couple of files at every level so leaves aren't the only
+		// thing being counted.
+		for f := 0; f < 2; f++ {
+			p := filepath.Join(dir, fmt.Sprintf("file%d.txt", f))
+			if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+				b.Fatalf("WriteFile(%q): %v", p, err)
+			}
+		}
+		if level >= depth {
+			return
+		}
+		for i := 0; i < breadth; i++ {
+			sub := filepath.Join(dir, fmt.Sprintf("d%d", i))
+			if err := os.Mkdir(sub, 0o755); err != nil {
+				b.Fatalf("Mkdir(%q): %v", sub, err)
+			}
+			build(sub, level+1)
+		}
+	}
+	build(root, 0)
+
+	return root
+}
+
+// BenchmarkWalk_Synthetic is the deterministic counterpart to
+// BenchmarkWalk_Sequential/_Parallel above: same sequential-vs-pool
+// comparison, but on a fixed-shape tree (depth 4, breadth 6 -> 1,554
+// directories, 3,108 files) instead of whatever "/" happens to contain.
+// Prefer this pair when comparing numbers across machines or commits;
+// prefer the "/" benchmarks when you specifically want to know real-world
+// walk throughput on this machine's actual filesystem.
+func BenchmarkWalk_Synthetic(b *testing.B) {
+	const depth, breadth = 4, 6
+	root := buildSyntheticTree(b, depth, breadth)
+
+	b.Run("Sequential", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			walkDirSequential(root, benchSkip)
+		}
+	})
+
+	b.Run("Parallel", func(b *testing.B) {
+		pc := defaultPoolConfig()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			walkParallel(b, root, benchSkip, pc)
+		}
+	})
+}
+
+// BenchmarkWalk_Synthetic_PoolSize is BenchmarkWalk_PoolSize's
+// deterministic counterpart - the same "does stealing pay for itself as
+// worker count climbs" question, but reproducible across machines.
+func BenchmarkWalk_Synthetic_PoolSize(b *testing.B) {
+	const depth, breadth = 4, 6
+	root := buildSyntheticTree(b, depth, breadth)
+
+	for _, poolSize := range []int{1, 2, 4, 8, 16, 32} {
+		pc := PoolConfig{PoolSize: poolSize, InitialWorkerCap: 32, ResultBuffSize: 64}
+		b.Run(fmt.Sprintf("workers=%d", poolSize), func(b *testing.B) {
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				walkParallel(b, root, benchSkip, pc)
+			}
+		})
+	}
+}
