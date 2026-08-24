@@ -146,7 +146,7 @@ The `/` run produced different entry counts between Walkman and walkdir, despite
 | Sorting                     | No       | Yes           |
 | Contents-first traversal    | No       | Yes           |
 | Maximum open directories    | No       | Yes           |
-| Atomic statistics           | Optional | No equivalent |
+| statistics                  | Yes      | Yes           |
 | Configurable worker pool    | Yes      | No            |
 
 Walkman deliberately optimizes for concurrent traversal and streaming. It does not attempt to reproduce every semantic and ordering feature of walkdir yet.
