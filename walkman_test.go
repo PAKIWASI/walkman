@@ -774,7 +774,7 @@ func TestNewWalkman_DefaultsToGOMAXPROCS(t *testing.T) {
 	// Not directly observable from the exported API, so this just
 	// documents/protects the constructor's intended default via
 	// defaultPoolConfig() rather than reaching into unexported state.
-	if got := defaultPoolConfig().PoolSize; got != runtime.GOMAXPROCS(0) {
+	if got := DefaultPoolConfig().PoolSize; got != runtime.GOMAXPROCS(0) {
 		t.Fatalf("defaultPoolConfig().PoolSize = %d, want GOMAXPROCS = %d", got, runtime.GOMAXPROCS(0))
 	}
 }

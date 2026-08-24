@@ -23,6 +23,8 @@ import (
 // 2. iterator support — once Go's range-over-func (iter.Seq) is in play
 //    here, Walk could return an iterator instead of a channel. Same
 //    ordering caveat as above applies.
+// 3. pipelines?
+
 
 type walkConf struct {
 	followLinks bool
@@ -59,14 +61,14 @@ type PoolConfig struct {
 	ResultBuffSize   int
 }
 
-// defaultPoolConfig matches PoolSize to GOMAXPROCS. Per the workstealpool
+// DefaultPoolConfig matches PoolSize to GOMAXPROCS. Per the workstealpool
 // README's own benchmarks: speedup on a CPU-bound divide-and-conquer
 // workload tracks physical/logical core count and then plateaus right at
 // GOMAXPROCS, with a slight regression going meaningfully past it
 // (oversubscription). InitialWorkerCap/ResultBuffSize matter far less
 // (a few hundred µs across their whole sweep) — 32/64 here just matches
 // the fixed baseline used across their other sweeps, not a walking-specific finding
-func defaultPoolConfig() PoolConfig {
+func DefaultPoolConfig() PoolConfig {
 	return PoolConfig{
 		PoolSize:         runtime.GOMAXPROCS(0),
 		InitialWorkerCap: 32,
@@ -111,7 +113,7 @@ func join(dir, name string) string {
 // NewWalkman builds a Walkman with GOMAXPROCS-based pool sizing and stats
 // tracking off. Use NewWalkmanWithConfig for explicit pool sizing or to turn stats on.
 func NewWalkman(followLinks bool, maxDepth uint32, skipList []string) *Walkman {
-	return NewWalkmanWithConfig(followLinks, maxDepth, skipList, false, defaultPoolConfig())
+	return NewWalkmanWithConfig(followLinks, maxDepth, skipList, false, DefaultPoolConfig())
 }
 
 // NewWalkmanWithConfig is NewWalkman but with every knob explicit: whether
@@ -246,3 +248,5 @@ func (w *Walkman) Stats() (files, dirs, links, skipped, maxDepthReached uint32) 
 		w.stats.skipped.Load(),
 		w.stats.maxDepthReached.Load()
 }
+
+

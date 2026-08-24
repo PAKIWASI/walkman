@@ -95,7 +95,7 @@ func BenchmarkWalk_Sequential(b *testing.B) {
 // BenchmarkWalk_Sequential above.
 func BenchmarkWalk_Parallel(b *testing.B) {
 	root := benchRoot()
-	pc := defaultPoolConfig()
+	pc := DefaultPoolConfig()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		walkParallel(b, root, benchSkip, pc)
@@ -160,7 +160,7 @@ func BenchmarkWalk_ResultBuffSize(b *testing.B) {
 // opt-in and off by default.
 func BenchmarkWalk_TrackStats(b *testing.B) {
 	root := benchRoot()
-	pc := defaultPoolConfig()
+	pc := DefaultPoolConfig()
 
 	b.Run("off", func(b *testing.B) {
 		b.ResetTimer()
@@ -239,7 +239,7 @@ func BenchmarkWalk_Synthetic(b *testing.B) {
 	})
 
 	b.Run("Parallel", func(b *testing.B) {
-		pc := defaultPoolConfig()
+		pc := DefaultPoolConfig()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			walkParallel(b, root, benchSkip, pc)
