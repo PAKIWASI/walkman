@@ -1,65 +1,26 @@
-
-╭╴ artixThinkpad  wasi go/walkman/build   main  ?⇡1
-╰── ./build_tree.sh /tmp/synth_tree                                                                                                                   17:00
-built synthetic tree at /tmp/synth_tree
-files: 3110
-dirs (incl root): 1555
-
-╭╴ artixThinkpad  wasi go/walkman/build   main  ?⇡1
-╰── ./main /tmp/synth_tree                                                                                                                            17:00
-files=3110 dirs=1554 links=0 errors=0
-elapsed=5.18357ms
-
-╭╴ artixThinkpad  wasi go/walkman/build   main  ?⇡1
-╰── ./walkdir-cli /tmp/synth_tree                                                                                                                     17:00
-files=3110 dirs=1554 links=0 errors=0
-elapsed=10.55473ms
-
-╭╴ artixThinkpad  wasi go/walkman/build   main  ?⇡1
-╰── ./main --quiet --bench 50 --workers 1 /tmp/synth_tree      # Go, single worker (fair vs Rust's 1 thread)                                          17:00
-bench: n=50 avg=12.0792ms min=6.986438ms max=17.854999ms avg_ns_op=12079200
-
-╭╴ artixThinkpad  wasi go/walkman/build   main  ?⇡1
-╰── ./main --quiet --bench 50 /tmp/synth_tree                  # Go, default GOMAXPROCS pool (your real speedup case)                                 17:01
-bench: n=50 avg=4.121103ms min=2.428089ms max=6.426758ms avg_ns_op=4121103
-
-╭╴ artixThinkpad  wasi go/walkman/build   main  ?⇡1
-╰── ./walkdir-cli --quiet --bench 50 /tmp/synth_tree            # Rust, sequential                                                                    17:01
-bench: n=50 avg=5.507049ms min=4.076396ms max=10.496323ms avg_ns_op=5507049
-
-╭╴ artixThinkpad  wasi go/walkman/build   main  ?⇡1
-╰── ./main --quiet --bench 20 /usr                                                                                                                    17:01
-bench: n=20 avg=122.267279ms min=114.067056ms max=192.409937ms avg_ns_op=122267279
-
-╭╴ artixThinkpad  wasi go/walkman/build   main  ?⇡1
-╰── ./walkdir-cli --quiet --bench 20 /usr                                                                                                             17:01
-bench: n=20 avg=402.993716ms min=397.78842ms max=453.460584ms avg_ns_op=402993716
-
-╭╴ artixThinkpad  wasi go/walkman/build   main  !?
-╰── ./main /                                                                                                                                          17:08
-files=947253 dirs=54574 links=470312 errors=1270
-elapsed=343.205396ms
-
-╭╴ artixThinkpad  wasi go/walkman/build   main  !?
-╰── ./walkdir-cli /                                                                                                                                   17:08
-files=945700 dirs=54442 links=469885 errors=1270
-elapsed=925.684728ms
-
-╭╴ artixThinkpad  wasi go/walkman/test   main  !?
-╰── ./build_tree.sh /tmp/synth_tree                                                                                                                   17:11
-built synthetic tree at /tmp/synth_tree
-files: 39062
-dirs (incl root): 19531
-
-╭╴ artixThinkpad  wasi go/walkman/build   main  !?
-╰── ./main /tmp/synth_tree                                                                                                                            17:12
-files=39062 dirs=19530 links=0 errors=0
-elapsed=66.165275ms
-
-╭╴ artixThinkpad  wasi go/walkman/build   main  !?
-╰── ./walkdir-cli /tmp/synth_tree                                                                                                                     17:12
-files=39062 dirs=19530 links=0 errors=0
-elapsed=98.716672ms
-
-
-
+╭╴ artixThinkpad  wasi go/walkman/build   main  !
+╰── ./main /tmp/tree_deep                                                                                                                           20:42
+files=1048572 dirs=524286 links=0 errors=0
+elapsed=952.39625ms
+╭╴ artixThinkpad  wasi go/walkman/build   main  !
+╰── ./walkdir-cli /tmp/tree_deep                                                                                                                    20:42
+files=1048572 dirs=524286 links=0 errors=0
+elapsed=1.930495811s
+╭╴ artixThinkpad  wasi go/walkman/build   main  !
+╰── ./main /                                                                                                                                        20:42
+files=2006358 dirs=579349 links=473197 errors=1255
+elapsed=1.180409054s
+╭╴ artixThinkpad  wasi go/walkman/build   main  !
+╰── ./walkdir-cli /                                                                                                                                 20:43
+files=2005195 dirs=579239 links=472979 errors=1255
+elapsed=2.912663867s
+╭╴ artixThinkpad  wasi go/walkman/build   main  !
+╰── ./main /home/wasi                                                                                                                               20:43
+files=365794 dirs=25305 links=138 errors=0
+elapsed=172.273502ms
+╭╴ artixThinkpad  wasi go/walkman/build   main  !
+╰── ./walkdir-cli /home/wasi                                                                                                                        20:43
+files=365794 dirs=25305 links=138 errors=0
+elapsed=356.497991ms
+╭╴ artixThinkpad  wasi go/walkman/build   main  !
+╰──                                                                                                                                                 20:43
