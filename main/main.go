@@ -2,20 +2,18 @@ package main
 
 import (
 	"fmt"
-	"path/filepath"
 
 	walkman "github.com/PAKIWASI/walkman"
 )
 
 func main() {
+	wm := walkman.NewWalkman(false, 1000, []string{".git"})
 
-	walkman := walkman.NewWalkman(false, 1000, []string{})
-
-	ch := walkman.Walk("/home/wasi")
+	ch := wm.Walk("/")
 
 	for c := range ch {
 		if c.Err != nil {
-			fmt.Println("error:", c.Err)
+			fmt.Println("error:", c.Dir, c.Err)
 			continue
 		}
 		for _, entry := range c.Ret {
@@ -23,7 +21,11 @@ func main() {
 			if entry.IsDir() {
 				kind = "d"
 			}
-			fmt.Printf("%s  %s\n", kind, filepath.Join(c.Dir, entry.Name()))
+			fmt.Printf("%s  %s\n", kind, c.Dir+"/"+entry.Name())
 		}
+	}
+
+	if err := wm.Wait(); err != nil {
+		fmt.Println("walk failed:", err)
 	}
 }
