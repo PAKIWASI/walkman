@@ -32,17 +32,19 @@
 #      you're still climbing or already past the plateau the walkman.go
 #      comment mentions for workstealpool.
 #
-# Requires: hyperfine (https://github.com/sharkdp/hyperfine), GNU time
-# (`apt install time` — the standalone binary at /usr/bin/time, not the
-# shell builtin).
+# Requires: hyperfine (https://github.com/sharkdp/hyperfine), zsh (for the
+# `time` builtin used to capture user+sys CPU seconds — bash's own `time`
+# reserved word has no machine-parseable output format, which zsh's does
+# via TIMEFMT).
 #
-# Usage:
+# Usage (run from walkman/walkman/test/, against binaries already built
+# into walkman/walkman/build/):
 #   ./build_tree.sh --shape wide  --root /tmp/tree_wide  --seed 42
 #   ./bench_harness.sh \
-#       --walkman   /path/to/walkman/build/main \
-#       --walkdir   /path/to/walkman/build/walkdir-cli \
+#       --walkman   ../build/main \
+#       --walkdir   ../build/walkdir-cli \
 #       --tree      /tmp/tree_wide \
-#       --workers   "1,2,4,8,$(nproc)" \
+#       --workers   "1,2,4,$(nproc)" \
 #       --out       results_wide.csv
 
 set -euo pipefail
@@ -78,14 +80,15 @@ for req in WALKMAN_BIN WALKDIR_BIN TREE; do
 done
 
 command -v hyperfine >/dev/null || { echo "hyperfine not found: https://github.com/sharkdp/hyperfine#installation" >&2; exit 1; }
-# NOTE: plain `command -v time` is not a reliable check — bash treats
-# `time` as a reserved word, so `command -v time` prints "time" (no path)
-# even when no real GNU-time binary is installed, and the check below
-# would wrongly pass. `type -P` only matches real executables on PATH,
-# never reserved words/builtins, so it's the correct check here.
-GNU_TIME="$(type -P time || true)"
-if [[ -z "$GNU_TIME" ]]; then
-  echo "warning: GNU time not found (apt install time) — CPU-time columns will be blank" >&2
+# CPU-time capture uses zsh's `time` builtin rather than the GNU coreutils
+# `time` binary — no extra package to install, and TIMEFMT gives a
+# machine-parseable "%U %S" line the same way GNU time's -f flag did.
+# (bash's own `time` reserved word has no equivalent format control, and
+# `command -v time` / `type -P time` can't reliably find it since it's a
+# shell keyword, not a PATH executable — hence checking for zsh itself.)
+ZSH_BIN="$(type -P zsh || true)"
+if [[ -z "$ZSH_BIN" ]]; then
+  echo "warning: zsh not found — CPU-time columns will be blank" >&2
 fi
 
 if [[ "$COLD" -eq 1 ]]; then
@@ -128,12 +131,18 @@ trap 'rm -rf "$SCRATCH"' EXIT
 
 capture_cpu_time() {
   # One extra untimed-by-hyperfine run purely to get user/sys aggregate
-  # CPU seconds via GNU time, since hyperfine itself only reports wall
-  # clock. Run after the hyperfine measurement so it doesn't perturb it.
+  # CPU seconds, since hyperfine itself only reports wall clock. Run
+  # after the hyperfine measurement so it doesn't perturb it.
+  #
+  # Uses zsh's `time` builtin with TIMEFMT set to just "%U %S" — the
+  # command's own stdout/stderr are discarded *inside* the timed group,
+  # so the only thing landing in $cpu_out is zsh's own timing report,
+  # not a mix of the two (which is what silently corrupted the CSV via
+  # `sed` before this was rewritten to write whole rows in Python).
   local cmd="$1"
   local cpu_out="$SCRATCH/cpu_time.$$"
-  if [[ -n "$GNU_TIME" ]]; then
-    "$GNU_TIME" -f "%U %S" -o "$cpu_out" bash -c "$cmd" >/dev/null 2>"$cpu_out"
+  if [[ -n "$ZSH_BIN" ]]; then
+    "$ZSH_BIN" -c "TIMEFMT='%U %S'; time ( $cmd >/dev/null 2>&1 )" 2>"$cpu_out"
     read -r user sys < "$cpu_out"
     rm -f "$cpu_out"
     echo "$user,$sys"
