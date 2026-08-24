@@ -78,7 +78,12 @@ for req in WALKMAN_BIN WALKDIR_BIN TREE; do
 done
 
 command -v hyperfine >/dev/null || { echo "hyperfine not found: https://github.com/sharkdp/hyperfine#installation" >&2; exit 1; }
-GNU_TIME="$(command -v time || true)"
+# NOTE: plain `command -v time` is not a reliable check — bash treats
+# `time` as a reserved word, so `command -v time` prints "time" (no path)
+# even when no real GNU-time binary is installed, and the check below
+# would wrongly pass. `type -P` only matches real executables on PATH,
+# never reserved words/builtins, so it's the correct check here.
+GNU_TIME="$(type -P time || true)"
 if [[ -z "$GNU_TIME" ]]; then
   echo "warning: GNU time not found (apt install time) — CPU-time columns will be blank" >&2
 fi
@@ -111,50 +116,60 @@ fi
 
 echo "tool,workers,mean_wall_s,stddev_wall_s,min_wall_s,max_wall_s,user_s,sys_s" > "$OUT"
 
+# Private per-run scratch dir instead of fixed /tmp filenames. Fixed names
+# (e.g. /tmp/_hf_walkdir.json) are a collision/permission hazard: a
+# leftover file from a prior run — especially one invoked under sudo, or
+# by another user/cron job — can be left owned by someone else, and /tmp's
+# sticky bit then blocks us from removing or overwriting it. mktemp -d
+# gives us a directory only we own, and the trap guarantees cleanup even
+# if the script errors out partway through.
+SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/bench_harness.XXXXXX")"
+trap 'rm -rf "$SCRATCH"' EXIT
+
 capture_cpu_time() {
   # One extra untimed-by-hyperfine run purely to get user/sys aggregate
   # CPU seconds via GNU time, since hyperfine itself only reports wall
   # clock. Run after the hyperfine measurement so it doesn't perturb it.
   local cmd="$1"
+  local cpu_out="$SCRATCH/cpu_time.$$"
   if [[ -n "$GNU_TIME" ]]; then
-    "$GNU_TIME" -f "%U %S" -o /tmp/_cpu_time.$$ bash -c "$cmd" >/dev/null 2>/tmp/_cpu_time.$$
-    read -r user sys < /tmp/_cpu_time.$$
-    rm -f /tmp/_cpu_time.$$
+    "$GNU_TIME" -f "%U %S" -o "$cpu_out" bash -c "$cmd" >/dev/null 2>"$cpu_out"
+    read -r user sys < "$cpu_out"
+    rm -f "$cpu_out"
     echo "$user,$sys"
   else
     echo ","
   fi
 }
 
-echo "=== walkdir-cli (Rust, sequential — reference point) ==="
-CMD="$WALKDIR_BIN --quiet '$TREE'"
-hyperfine --warmup "$WARMUP" --min-runs "$MIN_RUNS" --export-json /tmp/_hf_walkdir.json "$CMD"
-python3 - "$OUT" "walkdir" "-" /tmp/_hf_walkdir.json <<'PYEOF'
+# Writes one finished CSV row (hyperfine stats + CPU time together), so
+# there's no separate patch-the-row-after-the-fact step and thus nothing
+# for a `sed` pattern (or a stray `/` in $cpu) to collide with.
+write_row() {
+  local tool="$1" workers="$2" json_file="$3" user="$4" sys="$5"
+  python3 - "$OUT" "$tool" "$workers" "$json_file" "$user" "$sys" <<'PYEOF'
 import json, sys
-out, tool, workers, jf = sys.argv[1:5]
+out, tool, workers, jf, user, sys_t = sys.argv[1:7]
 d = json.load(open(jf))["results"][0]
 with open(out, "a") as f:
-    f.write(f"{tool},{workers},{d['mean']},{d['stddev']},{d['min']},{d['max']},,\n")
+    f.write(f"{tool},{workers},{d['mean']},{d['stddev']},{d['min']},{d['max']},{user},{sys_t}\n")
 PYEOF
-cpu=$(capture_cpu_time "$CMD")
-sed -i "s/^walkdir,-,\([^,]*,[^,]*,[^,]*,[^,]*\),,\$/walkdir,-,\1,${cpu}/" "$OUT"
+}
+
+echo "=== walkdir-cli (Rust, sequential — reference point) ==="
+CMD="$WALKDIR_BIN --quiet '$TREE'"
+hyperfine --warmup "$WARMUP" --min-runs "$MIN_RUNS" --export-json "$SCRATCH/hf_walkdir.json" "$CMD"
+IFS=',' read -r cpu_user cpu_sys <<< "$(capture_cpu_time "$CMD")"
+write_row "walkdir" "-" "$SCRATCH/hf_walkdir.json" "$cpu_user" "$cpu_sys"
 
 IFS=',' read -ra WLIST <<< "$WORKERS"
 for w in "${WLIST[@]}"; do
   echo "=== walkman (Go, workers=$w) ==="
   CMD="$WALKMAN_BIN --quiet --workers $w '$TREE'"
-  hyperfine --warmup "$WARMUP" --min-runs "$MIN_RUNS" --export-json /tmp/_hf_walkman.json "$CMD"
-  python3 - "$OUT" "walkman" "$w" /tmp/_hf_walkman.json <<'PYEOF'
-import json, sys
-out, tool, workers, jf = sys.argv[1:5]
-d = json.load(open(jf))["results"][0]
-with open(out, "a") as f:
-    f.write(f"{tool},{workers},{d['mean']},{d['stddev']},{d['min']},{d['max']},,\n")
-PYEOF
-  cpu=$(capture_cpu_time "$CMD")
-  sed -i "s/^walkman,${w},\([^,]*,[^,]*,[^,]*,[^,]*\),,\$/walkman,${w},\1,${cpu}/" "$OUT"
+  hyperfine --warmup "$WARMUP" --min-runs "$MIN_RUNS" --export-json "$SCRATCH/hf_walkman.json" "$CMD"
+  IFS=',' read -r cpu_user cpu_sys <<< "$(capture_cpu_time "$CMD")"
+  write_row "walkman" "$w" "$SCRATCH/hf_walkman.json" "$cpu_user" "$cpu_sys"
 done
 
-rm -f /tmp/_hf_walkdir.json /tmp/_hf_walkman.json
 echo "results written to $OUT"
 column -s, -t "$OUT"
