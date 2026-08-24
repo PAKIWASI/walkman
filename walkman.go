@@ -13,12 +13,12 @@ import (
 )
 
 // TODO:
-// NOW: 
+// NOW:
 // 1. max depth stuff
-// 2. sorting, bfs
-// 3. the TODOs scattered around
+// 2. the TODOs scattered around
 // LATER:
-// 1. iterator support
+// 1. sorting, bfs
+// 2. iterator support
 
 
 type walkConf struct {
@@ -38,11 +38,10 @@ type walkStats struct {
 }
 
 type WalkResult struct {
-	ret []fs.DirEntry
-	err error
+	Dir string
+	Ret []fs.DirEntry
+	Err error
 }
-
-type ctxSkipList struct{}
 
 type Walkman struct {
 	conf  walkConf
@@ -62,6 +61,8 @@ func readDir(name string) ([]fs.DirEntry, error) {
 	dirs, err := f.ReadDir(-1)
 	return dirs, err
 }
+
+// TODO: provide another New func that takes in explicit values for pool config
 
 func NewWalkman(followLinks bool, maxDepth uint32, skipList []string) Walkman {
 
@@ -99,7 +100,7 @@ func NewWalkman(followLinks bool, maxDepth uint32, skipList []string) Walkman {
 					}
 				}
 
-				return &WalkResult{ret: dirs, err: nil}, nil
+				return &WalkResult{Dir: item, Ret: dirs, Err: nil}, nil
 			}),
 	}
 }
