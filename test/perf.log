@@ -1,0 +1,130 @@
+
+╰── perf stat -e task-clock,context-switches,cpu-migrations,page-faults,cycles,instructions,cache-misses \                                           02:42
+  ./build/ignore-parallel-cli --quiet --workers 8 /tmp/tree_wide
+
+perf stat -e task-clock,context-switches,cpu-migrations,page-faults,cycles,instructions,cache-misses \
+  ./build/main --quiet --workers 8 /tmp/tree_wide
+
+ Performance counter stats for './build/ignore-parallel-cli --quiet --workers 8 /tmp/tree_wide':
+
+             51.01 msec task-clock:u
+                 0      context-switches:u
+                 0      cpu-migrations:u
+               210      page-faults:u
+        60,771,211      cycles:u
+        27,498,235      instructions:u
+            14,592      cache-misses:u
+
+       0.009863759 seconds time elapsed
+
+       0.016071000 seconds user
+       0.035284000 seconds sys
+
+
+
+ Performance counter stats for './build/main --quiet --workers 8 /tmp/tree_wide':
+
+             34.47 msec task-clock:u
+                 0      context-switches:u
+                 0      cpu-migrations:u
+               159      page-faults:u
+        33,160,208      cycles:u
+        28,676,045      instructions:u
+            43,925      cache-misses:u
+
+       0.006918915 seconds time elapsed
+
+       0.010833000 seconds user
+       0.023455000 seconds sys
+
+
+╭╴ artixThinkpad  wasi projects/go/walkman   main  !?
+╰── perf record -F 999 -g -o /tmp/ip.perf -- ./build/ignore-parallel-cli --quiet --workers 8 /                                                       02:43
+perf report -i /tmp/ip.perf --stdio --no-children | head -40
+[ perf record: Woken up 1 times to write data ]
+[ perf record: Captured and wrote 0.465 MB /tmp/ip.perf (6482 samples) ]
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 6K of event 'cpu/cycles/Pu'
+# Event count (approx.): 7564045053
+#
+# Overhead  Command          Shared Object        Symbol
+# ........  ...............  ...................  ...........................
+#
+     7.55%  ignore-parallel  libc.so.6            [.] realloc
+            |
+             --7.50%--realloc
+                       0x557c4ca14aac
+                       |
+                       |--6.52%--0x557c4cb557e2
+                       |          0x557c4ca7db0e
+                       |
+                        --0.98%--0x557c4cb5581f
+                                  0x557c4ca7db0e
+
+     4.37%  ignore-parallel  ignore-parallel-cli  [.] 0x00000000000ac724
+            |
+            ---0x557c4ca7e726
+               0x1
+
+     4.21%  ignore-parallel  libc.so.6            [.] 0x00000000000a5aab
+            |
+            ---0x7f185c4a5aad
+
+     3.61%  ignore-parallel  ignore-parallel-cli  [.] 0x0000000000042c6a
+            |
+            ---0x557c4ca14c6c
+               |
+               |--1.81%--0x557c4ca7bbb5
+               |          |
+               |           --1.53%--0xdc408c68302202af
+               |
+                --1.79%--0x557c4ca7e816
+╭╴ artixThinkpad  wasi projects/go/walkman   main  !?
+╰── perf record -F 999 -g -o /tmp/wm.perf -- ./build/main --quiet --workers 8 /                                                                      02:43
+perf report -i /tmp/wm.perf --stdio --no-children | head -40
+[ perf record: Woken up 2 times to write data ]
+[ perf record: Captured and wrote 0.394 MB /tmp/wm.perf (2675 samples) ]
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 2K of event 'cpu/cycles/Pu'
+# Event count (approx.): 2284661754
+#
+# Overhead  Command  Shared Object     Symbol                                                                                                                  
+# ........  .......  ................  ........................................................................................................................................................................................................................................
+#
+    11.97%  main     main              [.] os.(*File).readdir
+            |
+            |--10.53%--os.(*File).readdir
+            |          os.(*File).ReadDir
+            |          github.com/PAKIWASI/walkman.readDir
+            |          github.com/PAKIWASI/walkman.(*Walkman).visit
+            |          github.com/PAKIWASI/walkman.(*Walkman).visit-fm
+            |          github.com/PAKIWASI/workstealpool.(*WorkerPool[go.shape.struct { github.com/PAKIWASI/walkman.path string; github.com/PAKIWASI/walkman.depth uint32 },go.shape.struct { Dir string; Ret []io/fs.DirEntry; Err error }]).runTask
+            |          github.com/PAKIWASI/workstealpool.(*WorkerPool[go.shape.struct { github.com/PAKIWASI/walkman.path string; github.com/PAKIWASI/walkman.depth uint32 },go.shape.struct { Dir string; Ret []io/fs.DirEntry; Err error }]).runWorker
+            |          github.com/PAKIWASI/workstealpool.(*WorkerPool[go.shape.struct { github.com/PAKIWASI/walkman.path string; github.com/PAKIWASI/walkman.depth uint32 },go.shape.struct { Dir string; Ret []io/fs.DirEntry; Err error }]).Run.func1
+            |          golang.org/x/sync/errgroup.(*Group).Go.func1
+            |          runtime.goexit (inlined)
+            |
+             --0.68%--os.direntType (inlined)
+                       os.(*File).readdir
+                       os.(*File).ReadDir
+                       github.com/PAKIWASI/walkman.readDir
+                       github.com/PAKIWASI/walkman.(*Walkman).visit
+                       github.com/PAKIWASI/walkman.(*Walkman).visit-fm
+                       github.com/PAKIWASI/workstealpool.(*WorkerPool[go.shape.struct { github.com/PAKIWASI/walkman.path string; github.com/PAKIWASI/walkman.depth uint32 },go.shape.struct { Dir string; Ret []io/fs.DirEntry; Err error }]).runTask
+                       github.com/PAKIWASI/workstealpool.(*WorkerPool[go.shape.struct { github.com/PAKIWASI/walkman.path string; github.com/PAKIWASI/walkman.depth uint32 },go.shape.struct { Dir string; Ret []io/fs.DirEntry; Err error }]).runWorker
+                       github.com/PAKIWASI/workstealpool.(*WorkerPool[go.shape.struct { github.com/PAKIWASI/walkman.path string; github.com/PAKIWASI/walkman.depth uint32 },go.shape.struct { Dir string; Ret []io/fs.DirEntry; Err error }]).Run.func1
+                       golang.org/x/sync/errgroup.(*Group).Go.func1
+                       runtime.goexit (inlined)
+
+     8.84%  main     main              [.] runtime.tryDeferToSpanScan
+            |
+            |--7.35%--runtime.tryDeferToSpanScan
+            |          |

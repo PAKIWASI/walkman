@@ -191,11 +191,15 @@ Same deterministic wide tree (**1,884 dirs, 11,304 files**), Intel i5-1135G7, me
 
 | Walker | Workers | Mean |
 | --- | ---: | ---: |
-| Rust `walkdir` | seq | 17.1 ms |
-| `walkman` | 1 | 12.4 ms |
-| `walkman` | 2 | 7.4 ms |
-| `walkman` | 4 | **5.4 ms** |
-| `walkman` | 8 | 8.3 ms |
+| Rust `walkdir` | seq | 17.4 ms |
+| Rust `ignore::WalkParallel` | 1 | 19.7 ms |
+| Rust `ignore::WalkParallel` | 2 | 17.7 ms |
+| Rust `ignore::WalkParallel` | 4 | 20.2 ms |
+| Rust `ignore::WalkParallel` | 8 | 21.3 ms |
+| `walkman` | 1 | 12.1 ms |
+| `walkman` | 2 | 7.3 ms |
+| `walkman` | 4 | **5.2 ms** |
+| `walkman` | 8 | 7.6 ms |
 
 **In-process (`go test -bench=WorkerSweep -count=10`):**
 
@@ -203,12 +207,10 @@ Same deterministic wide tree (**1,884 dirs, 11,304 files**), Intel i5-1135G7, me
 | --- | ---: |
 | 1 | 11.9 ms |
 | 2 | 6.9 ms |
-| 4 | 4.1 ms |
+| 4 | 4.2 ms |
 | 8 | **3.2 ms** |
 
-CLI timing plateaus/regresses past 4 workers (process overhead dominates); the pool itself keeps scaling to 8.
-
-> The table above predates `rust_ignore_parallel/`. Rerun `bench_harness.sh` with `--ignore-parallel` (added below) to get `ignore::WalkParallel` numbers on your own hardware alongside these — a same-machine, same-tree, same-harness run is the only fair comparison, so no `ignore-parallel` numbers are hardcoded here.
+CLI timing plateaus/regresses past 4 workers (process overhead dominates); the in-process pool keeps scaling to 8. `ignore::WalkParallel` doesn't scale on this tree at all — its wall-clock is flat-to-worse from 1→8 workers while its own CPU time climbs steadily (9 → 20 → 40 → 57 ms user), the signature of fixed per-call thread-pool spin-up/teardown cost that a tree this size can't amortize. On a much larger, real-world tree (`/`, ~1M entries) `walkman` still pulled ahead by ~2.8x wall-clock while using 674% CPU vs `ignore::WalkParallel`'s 197% — so the gap isn't a small-tree artifact, though that run isn't a controlled/reproducible benchmark the way the synthetic tree above is.
 
 Reproduce with:
 
@@ -223,6 +225,8 @@ Reproduce with:
   --out              test/results_wide.csv
 WALKMAN_BENCH_ROOT=/tmp/tree_wide go test -bench=WorkerSweep -benchmem -count=10 ./...
 ```
+
+`ignore-parallel-cli` build pin (see `rust_ignore_parallel/Cargo.toml`): built with `rustc`/`cargo` 1.75.0, `ignore = "=0.4.16"`, `globset` pinned to `0.4.16` — newer releases of both require the `edition2024` Cargo feature (~1.85+ toolchain). `--release` profile, `opt-level = 3`, `lto = true`, matching `walkdir-cli`'s profile.
 
 Raw logs (including million-file runs) are in `test/*.log`.
 
