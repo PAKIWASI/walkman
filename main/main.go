@@ -14,6 +14,8 @@
 //	--bench N         repeat N times, report timing stats
 //	--quiet           suppress summary line
 //	--workers N       pool size (0 = GOMAXPROCS default, matches defaultPoolConfig)
+
+// TODO: symlink cycle detection is not present right now, do that to test that with walkdir aswell
 package main
 
 import (

@@ -9,8 +9,8 @@
 set -euo pipefail
 
 ROOT="${1:?usage: build_tree.sh <output-dir>}"
-DEPTH=10
-BREADTH=10
+DEPTH=6
+BREADTH=5
 
 build() {
 	local dir="$1" level="$2" i
