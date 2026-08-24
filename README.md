@@ -7,7 +7,6 @@
 > **Status:** experimental / actively evolving. The core walker, concurrency behavior, tests, and benchmark harness are in place, but the API and feature set are not yet considered stable.
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/PAKIWASI/walkman.svg)](https://pkg.go.dev/github.com/PAKIWASI/walkman)
-[![Go Report Card](https://goreportcard.com/badge/github.com/PAKIWASI/walkman)](https://goreportcard.com/report/github.com/PAKIWASI/walkman)
 
 ---
 
