@@ -1,0 +1,29 @@
+
+╭╴ artixThinkpad  wasi go/walkman/build   main  ?⇡1
+╰── ./build_tree.sh /tmp/synth_tree                                                                                                                   17:00
+built synthetic tree at /tmp/synth_tree
+files: 3110
+dirs (incl root): 1555
+╭╴ artixThinkpad  wasi go/walkman/build   main  ?⇡1
+╰── ./main /tmp/synth_tree                                                                                                                            17:00
+files=3110 dirs=1554 links=0 errors=0
+elapsed=5.18357ms
+╭╴ artixThinkpad  wasi go/walkman/build   main  ?⇡1
+╰── ./walkdir-cli /tmp/synth_tree                                                                                                                     17:00
+files=3110 dirs=1554 links=0 errors=0
+elapsed=10.55473ms
+╭╴ artixThinkpad  wasi go/walkman/build   main  ?⇡1
+╰── ./main --quiet --bench 50 --workers 1 /tmp/synth_tree      # Go, single worker (fair vs Rust's 1 thread)                                          17:00
+bench: n=50 avg=12.0792ms min=6.986438ms max=17.854999ms avg_ns_op=12079200
+╭╴ artixThinkpad  wasi go/walkman/build   main  ?⇡1
+╰── ./main --quiet --bench 50 /tmp/synth_tree                  # Go, default GOMAXPROCS pool (your real speedup case)                                 17:01
+bench: n=50 avg=4.121103ms min=2.428089ms max=6.426758ms avg_ns_op=4121103
+╭╴ artixThinkpad  wasi go/walkman/build   main  ?⇡1
+╰── ./walkdir-cli --quiet --bench 50 /tmp/synth_tree            # Rust, sequential                                                                    17:01
+bench: n=50 avg=5.507049ms min=4.076396ms max=10.496323ms avg_ns_op=5507049
+╭╴ artixThinkpad  wasi go/walkman/build   main  ?⇡1
+╰── ./main --quiet --bench 20 /usr                                                                                                                    17:01
+bench: n=20 avg=122.267279ms min=114.067056ms max=192.409937ms avg_ns_op=122267279
+╭╴ artixThinkpad  wasi go/walkman/build   main  ?⇡1
+╰── ./walkdir-cli --quiet --bench 20 /usr                                                                                                             17:01
+bench: n=20 avg=402.993716ms min=397.78842ms max=453.460584ms avg_ns_op=402993716
