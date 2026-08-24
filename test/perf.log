@@ -128,3 +128,15 @@ perf report -i /tmp/wm.perf --stdio --no-children | head -40
             |
             |--7.35%--runtime.tryDeferToSpanScan
             |          |
+
+
+
+
+
+
+
+
+
+Real finding #1 — the smoking gun: ignore-parallel-cli's top hotspot is realloc in libc at 7.55%, and its IPC is roughly half of main's (60.7M cycles / 27.5M instructions vs main's 33.2M cycles / 28.7M instructions — nearly identical instruction counts, but ignore-parallel-cli burns 2x the cycles per instruction). That's not scheduling contention, that's heap allocator churn. Every DirEntry in ignore/walkdir owns a heap-allocated PathBuf built by joining path segments — lots of small growing allocations. Go's os.(*File).ReadDir batches the raw getdents64 syscall and reuses buffer capacity, so it barely touches the allocator per entry. Under 8 threads, if glibc's malloc arenas are contended, this realloc traffic becomes a serialization point — which would explain exactly what you saw: more workers, same or worse wall-clock, since the threads are fighting over the allocator instead of doing independent work.
+
+Real finding #2: ignore-parallel-cli's own code shows up as bare hex addresses (0x00000000000ac724), not symbols — because I stripped it during the build. Only libc resolves. main's stack, by contrast, is fully readable and looks completely healthy: os.(*File).readdir (real syscall work) plus runtime.tryDeferToSpanScan (normal Go GC stack-scan overhead). Nothing alarming there — walkman's report is exactly what a lean implementation should look like.
