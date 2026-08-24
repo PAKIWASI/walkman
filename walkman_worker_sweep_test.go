@@ -1,6 +1,3 @@
-// Drop this alongside walkman_bench_test.go. It reuses walkParallel from
-// there and adds:
-//
 //   1. A worker-count sweep as sub-benchmarks (b.Run), so `go test -bench`
 //      gives you the whole scaling curve in one invocation instead of one
 //      hardcoded PoolConfig.

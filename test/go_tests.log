@@ -1,0 +1,146 @@
+
+╭╴ artixThinkpad  wasi projects/go/walkman   main  ✘?
+╰── ./test/build_tree.sh --shape wide --root /tmp/tree_wide --seed 42                                                                                19:48
+built /tmp/tree_wide: dirs=1884 files=11304 links=0 (seed=42)
+╭╴ artixThinkpad  wasi projects/go/walkman   main  ✘?
+╰── WALKMAN_BENCH_ROOT=/tmp/tree_wide go test -bench=WorkerSweep -benchmem -count=10 ./...                                                           19:49
+goos: linux
+goarch: amd64
+pkg: github.com/PAKIWASI/walkman
+cpu: 11th Gen Intel(R) Core(TM) i5-1135G7 @ 2.40GHz
+BenchmarkWorkerSweep/workers=1_(fair_vs_rust_sequential)-8         	      92	  12278470 ns/op	      1884 dirs	     11304 files	 2058880 B/op	   47448 allocs/op
+BenchmarkWorkerSweep/workers=1_(fair_vs_rust_sequential)-8         	      99	  11842507 ns/op	      1884 dirs	     11304 files	 2058375 B/op	   47448 allocs/op
+BenchmarkWorkerSweep/workers=1_(fair_vs_rust_sequential)-8         	     100	  11817013 ns/op	      1884 dirs	     11304 files	 2058498 B/op	   47448 allocs/op
+BenchmarkWorkerSweep/workers=1_(fair_vs_rust_sequential)-8         	      93	  11930368 ns/op	      1884 dirs	     11304 files	 2058833 B/op	   47448 allocs/op
+BenchmarkWorkerSweep/workers=1_(fair_vs_rust_sequential)-8         	      92	  11615758 ns/op	      1884 dirs	     11304 files	 2058076 B/op	   47448 allocs/op
+BenchmarkWorkerSweep/workers=1_(fair_vs_rust_sequential)-8         	      99	  11883142 ns/op	      1884 dirs	     11304 files	 2058289 B/op	   47448 allocs/op
+BenchmarkWorkerSweep/workers=1_(fair_vs_rust_sequential)-8         	      99	  11839400 ns/op	      1884 dirs	     11304 files	 2059036 B/op	   47448 allocs/op
+BenchmarkWorkerSweep/workers=1_(fair_vs_rust_sequential)-8         	      97	  11839056 ns/op	      1884 dirs	     11304 files	 2058128 B/op	   47448 allocs/op
+BenchmarkWorkerSweep/workers=1_(fair_vs_rust_sequential)-8         	     102	  11792475 ns/op	      1884 dirs	     11304 files	 2058337 B/op	   47448 allocs/op
+BenchmarkWorkerSweep/workers=1_(fair_vs_rust_sequential)-8         	     100	  11686171 ns/op	      1884 dirs	     11304 files	 2057678 B/op	   47448 allocs/op
+BenchmarkWorkerSweep/workers=2-8                                   	     170	   6862155 ns/op	      1884 dirs	     11304 files	 2066420 B/op	   47466 allocs/op
+BenchmarkWorkerSweep/workers=2-8                                   	     176	   6789886 ns/op	      1884 dirs	     11304 files	 2066576 B/op	   47467 allocs/op
+BenchmarkWorkerSweep/workers=2-8                                   	     174	   6863713 ns/op	      1884 dirs	     11304 files	 2066249 B/op	   47466 allocs/op
+BenchmarkWorkerSweep/workers=2-8                                   	     172	   7191456 ns/op	      1884 dirs	     11304 files	 2066926 B/op	   47466 allocs/op
+BenchmarkWorkerSweep/workers=2-8                                   	     157	   7059618 ns/op	      1884 dirs	     11304 files	 2065962 B/op	   47465 allocs/op
+BenchmarkWorkerSweep/workers=2-8                                   	     170	   6924925 ns/op	      1884 dirs	     11304 files	 2066646 B/op	   47466 allocs/op
+BenchmarkWorkerSweep/workers=2-8                                   	     169	   6766519 ns/op	      1884 dirs	     11304 files	 2066928 B/op	   47466 allocs/op
+BenchmarkWorkerSweep/workers=2-8                                   	     172	   6787440 ns/op	      1884 dirs	     11304 files	 2066217 B/op	   47466 allocs/op
+BenchmarkWorkerSweep/workers=2-8                                   	     160	   7369038 ns/op	      1884 dirs	     11304 files	 2066362 B/op	   47465 allocs/op
+BenchmarkWorkerSweep/workers=2-8                                   	     174	   6729757 ns/op	      1884 dirs	     11304 files	 2064802 B/op	   47465 allocs/op
+BenchmarkWorkerSweep/workers=4-8                                   	     290	   4140219 ns/op	      1884 dirs	     11304 files	 2076602 B/op	   47511 allocs/op
+BenchmarkWorkerSweep/workers=4-8                                   	     289	   4159281 ns/op	      1884 dirs	     11304 files	 2077436 B/op	   47511 allocs/op
+BenchmarkWorkerSweep/workers=4-8                                   	     289	   4137350 ns/op	      1884 dirs	     11304 files	 2075199 B/op	   47509 allocs/op
+BenchmarkWorkerSweep/workers=4-8                                   	     288	   4129869 ns/op	      1884 dirs	     11304 files	 2077679 B/op	   47510 allocs/op
+BenchmarkWorkerSweep/workers=4-8                                   	     284	   4252791 ns/op	      1884 dirs	     11304 files	 2075869 B/op	   47510 allocs/op
+BenchmarkWorkerSweep/workers=4-8                                   	     288	   4089375 ns/op	      1884 dirs	     11304 files	 2077501 B/op	   47512 allocs/op
+BenchmarkWorkerSweep/workers=4-8                                   	     290	   4204066 ns/op	      1884 dirs	     11304 files	 2076764 B/op	   47511 allocs/op
+BenchmarkWorkerSweep/workers=4-8                                   	     285	   4156303 ns/op	      1884 dirs	     11304 files	 2077035 B/op	   47512 allocs/op
+BenchmarkWorkerSweep/workers=4-8                                   	     294	   4143869 ns/op	      1884 dirs	     11304 files	 2076325 B/op	   47509 allocs/op
+BenchmarkWorkerSweep/workers=4-8                                   	     292	   4132126 ns/op	      1884 dirs	     11304 files	 2077775 B/op	   47511 allocs/op
+BenchmarkWorkerSweep/workers=8-8                                   	     374	   3467078 ns/op	      1884 dirs	     11304 files	 2083544 B/op	   47581 allocs/op
+BenchmarkWorkerSweep/workers=8-8                                   	     332	   3272769 ns/op	      1884 dirs	     11304 files	 2083169 B/op	   47581 allocs/op
+BenchmarkWorkerSweep/workers=8-8                                   	     368	   3247355 ns/op	      1884 dirs	     11304 files	 2083322 B/op	   47581 allocs/op
+BenchmarkWorkerSweep/workers=8-8                                   	     367	   3247994 ns/op	      1884 dirs	     11304 files	 2084000 B/op	   47582 allocs/op
+BenchmarkWorkerSweep/workers=8-8                                   	     363	   3306002 ns/op	      1884 dirs	     11304 files	 2083870 B/op	   47583 allocs/op
+BenchmarkWorkerSweep/workers=8-8                                   	     372	   3252615 ns/op	      1884 dirs	     11304 files	 2083747 B/op	   47584 allocs/op
+BenchmarkWorkerSweep/workers=8-8                                   	     369	   3236710 ns/op	      1884 dirs	     11304 files	 2083734 B/op	   47582 allocs/op
+BenchmarkWorkerSweep/workers=8-8                                   	     367	   3258755 ns/op	      1884 dirs	     11304 files	 2083310 B/op	   47581 allocs/op
+BenchmarkWorkerSweep/workers=8-8                                   	     372	   3245394 ns/op	      1884 dirs	     11304 files	 2082764 B/op	   47577 allocs/op
+BenchmarkWorkerSweep/workers=8-8                                   	     366	   3245249 ns/op	      1884 dirs	     11304 files	 2083742 B/op	   47584 allocs/op
+PASS
+ok  	github.com/PAKIWASI/walkman	63.829s
+?   	github.com/PAKIWASI/walkman/main	[no test files]
+╭╴ artixThinkpad  wasi projects/go/walkman   main  ✘!?
+╰── go test -bench=.                                                                                                                                 19:50
+goos: linux
+goarch: amd64
+pkg: github.com/PAKIWASI/walkman
+cpu: 11th Gen Intel(R) Core(TM) i5-1135G7 @ 2.40GHz
+BenchmarkWalk_Sequential-8           	       1	2259836128 ns/op
+BenchmarkWalk_Parallel-8             	       4	 259244424 ns/op
+BenchmarkWalk_PoolSize/workers=1-8   	       1	1087034284 ns/op
+BenchmarkWalk_PoolSize/workers=2-8   	       2	 550895271 ns/op
+BenchmarkWalk_PoolSize/workers=4-8   	       3	 337568157 ns/op
+BenchmarkWalk_PoolSize/workers=8-8   	       4	 263431423 ns/op
+BenchmarkWalk_PoolSize/workers=16-8  	       4	 255811528 ns/op
+BenchmarkWalk_PoolSize/workers=32-8  	       4	 255563800 ns/op
+BenchmarkWalk_InitialWorkerCap/cap=2-8         	       4	 262749391 ns/op
+BenchmarkWalk_InitialWorkerCap/cap=8-8         	       4	 260321474 ns/op
+BenchmarkWalk_InitialWorkerCap/cap=32-8        	       4	 262417892 ns/op
+BenchmarkWalk_InitialWorkerCap/cap=128-8       	       4	 265163459 ns/op
+BenchmarkWalk_InitialWorkerCap/cap=512-8       	       4	 263108626 ns/op
+BenchmarkWalk_ResultBuffSize/buf=0-8           	       4	 312120949 ns/op
+BenchmarkWalk_ResultBuffSize/buf=1-8           	       4	 302377236 ns/op
+BenchmarkWalk_ResultBuffSize/buf=16-8          	       4	 274050034 ns/op
+BenchmarkWalk_ResultBuffSize/buf=64-8          	       4	 260834237 ns/op
+BenchmarkWalk_ResultBuffSize/buf=256-8         	       4	 254495545 ns/op
+BenchmarkWalk_ResultBuffSize/buf=1024-8        	       5	 254917210 ns/op
+BenchmarkWalk_TrackStats/off-8                 	       4	 259610293 ns/op
+BenchmarkWalk_TrackStats/on-8                  	       4	 261551555 ns/op
+BenchmarkWalk_Synthetic/Sequential-8           	     132	   8852129 ns/op
+BenchmarkWalk_Synthetic/Parallel-8             	     502	   2399317 ns/op
+BenchmarkWalk_Synthetic_PoolSize/workers=1-8   	     148	   7287396 ns/op
+BenchmarkWalk_Synthetic_PoolSize/workers=2-8   	     258	   4522041 ns/op
+BenchmarkWalk_Synthetic_PoolSize/workers=4-8   	     430	   2760115 ns/op
+BenchmarkWalk_Synthetic_PoolSize/workers=8-8   	     500	   2365593 ns/op
+BenchmarkWalk_Synthetic_PoolSize/workers=16-8  	     522	   2281229 ns/op
+BenchmarkWalk_Synthetic_PoolSize/workers=32-8  	     513	   2320149 ns/op
+BenchmarkWorkerSweep/workers=1_(fair_vs_rust_sequential)-8         	       1	1096245391 ns/op	     55742 dirs	   1437485 files
+BenchmarkWorkerSweep/workers=2-8                                   	       2	 539515142 ns/op	     55742 dirs	   1437510 files
+BenchmarkWorkerSweep/workers=4-8                                   	       4	 317340776 ns/op	     55718 dirs	   1437349 files
+BenchmarkWorkerSweep/workers=8-8                                   	       4	 268274747 ns/op	     55718 dirs	   1437448 files
+PASS
+ok  	github.com/PAKIWASI/walkman	68.635s
+╭╴ artixThinkpad  wasi projects/go/walkman   main  ✘!?
+╰── go test -v                                                                                                                                     19:51
+=== RUN   TestWalk_EmptyDirectory
+--- PASS: TestWalk_EmptyDirectory (0.00s)
+=== RUN   TestWalk_FlatDirectory
+--- PASS: TestWalk_FlatDirectory (0.00s)
+=== RUN   TestWalk_NestedTree_MatchesFilepathWalkDir
+--- PASS: TestWalk_NestedTree_MatchesFilepathWalkDir (0.00s)
+=== RUN   TestWalk_SkipList_PrunesSubtree
+--- PASS: TestWalk_SkipList_PrunesSubtree (0.00s)
+=== RUN   TestWalk_SkipList_AppliesAtEveryDepth
+--- PASS: TestWalk_SkipList_AppliesAtEveryDepth (0.00s)
+=== RUN   TestWalk_MaxDepth_StopsDescending
+--- PASS: TestWalk_MaxDepth_StopsDescending (0.00s)
+=== RUN   TestWalk_MaxDepth_Zero_IsUnlimited
+--- PASS: TestWalk_MaxDepth_Zero_IsUnlimited (0.00s)
+=== RUN   TestWalk_FollowLinks_False_DoesNotDescend
+--- PASS: TestWalk_FollowLinks_False_DoesNotDescend (0.00s)
+=== RUN   TestWalk_FollowLinks_True_Descends
+--- PASS: TestWalk_FollowLinks_True_Descends (0.00s)
+=== RUN   TestWalk_BrokenSymlink_DoesNotCrash
+--- PASS: TestWalk_BrokenSymlink_DoesNotCrash (0.00s)
+=== RUN   TestWalk_NonexistentRoot_ReportsErrorNotFatal
+--- PASS: TestWalk_NonexistentRoot_ReportsErrorNotFatal (0.00s)
+=== RUN   TestWalk_RootIsRegularFile_ReportsError
+--- PASS: TestWalk_RootIsRegularFile_ReportsError (0.00s)
+=== RUN   TestWalk_PermissionDenied_IsRecoverable
+--- PASS: TestWalk_PermissionDenied_IsRecoverable (0.00s)
+=== RUN   TestWalk_Stats_AccurateCounts
+--- PASS: TestWalk_Stats_AccurateCounts (0.00s)
+=== RUN   TestWalk_Stats_OffByDefault
+--- PASS: TestWalk_Stats_OffByDefault (0.00s)
+=== RUN   TestWalk_ConsistentAcrossPoolSizes
+=== RUN   TestWalk_ConsistentAcrossPoolSizes/#00
+=== RUN   TestWalk_ConsistentAcrossPoolSizes/#01
+=== RUN   TestWalk_ConsistentAcrossPoolSizes/#02
+=== RUN   TestWalk_ConsistentAcrossPoolSizes/#03
+=== RUN   TestWalk_ConsistentAcrossPoolSizes/#04
+--- PASS: TestWalk_ConsistentAcrossPoolSizes (0.00s)
+    --- PASS: TestWalk_ConsistentAcrossPoolSizes/#00 (0.00s)
+    --- PASS: TestWalk_ConsistentAcrossPoolSizes/#01 (0.00s)
+    --- PASS: TestWalk_ConsistentAcrossPoolSizes/#02 (0.00s)
+    --- PASS: TestWalk_ConsistentAcrossPoolSizes/#03 (0.00s)
+    --- PASS: TestWalk_ConsistentAcrossPoolSizes/#04 (0.00s)
+=== RUN   TestWalk_RepeatedRuns_NoFlakiness
+--- PASS: TestWalk_RepeatedRuns_NoFlakiness (0.00s)
+=== RUN   TestWalk_OversubscribedParksAndWakesCleanly
+--- PASS: TestWalk_OversubscribedParksAndWakesCleanly (0.00s)
+=== RUN   TestNewWalkman_DefaultsToGOMAXPROCS
+--- PASS: TestNewWalkman_DefaultsToGOMAXPROCS (0.00s)
+PASS
+ok  	github.com/PAKIWASI/walkman	0.010s
