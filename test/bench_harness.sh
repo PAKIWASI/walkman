@@ -41,16 +41,25 @@
 # into walkman/walkman/build/):
 #   ./build_tree.sh --shape wide  --root /tmp/tree_wide  --seed 42
 #   ./bench_harness.sh \
-#       --walkman   ../build/main \
-#       --walkdir   ../build/walkdir-cli \
-#       --tree      /tmp/tree_wide \
-#       --workers   "1,2,4,$(nproc)" \
-#       --out       results_wide.csv
+#       --walkman          ../build/main \
+#       --walkdir          ../build/walkdir-cli \
+#       --ignore-parallel  ../build/ignore-parallel-cli \
+#       --tree             /tmp/tree_wide \
+#       --workers          "1,2,4,$(nproc)" \
+#       --out              results_wide.csv
+#
+# --ignore-parallel is optional: omit it (or the binary won't be built) and
+# the harness just runs walkman vs walkdir-cli as before. When given, it's
+# swept across the same --workers list as walkman, since (unlike
+# walkdir-cli's single sequential pass) it's a parallel walker too and the
+# comparison walkman actually wants is against another multi-threaded
+# walker, not just the sequential baseline.
 
 set -euo pipefail
 
 WALKMAN_BIN=""
 WALKDIR_BIN=""
+IGNORE_PARALLEL_BIN=""
 TREE=""
 WORKERS="1,2,4,$(nproc 2>/dev/null || echo 4)"
 OUT="bench_results.csv"
@@ -62,6 +71,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --walkman) WALKMAN_BIN="$2"; shift 2 ;;
     --walkdir) WALKDIR_BIN="$2"; shift 2 ;;
+    --ignore-parallel) IGNORE_PARALLEL_BIN="$2"; shift 2 ;;
     --tree)    TREE="$2"; shift 2 ;;
     --workers) WORKERS="$2"; shift 2 ;;
     --out)     OUT="$2"; shift 2 ;;
@@ -179,6 +189,16 @@ for w in "${WLIST[@]}"; do
   IFS=',' read -r cpu_user cpu_sys <<< "$(capture_cpu_time "$CMD")"
   write_row "walkman" "$w" "$SCRATCH/hf_walkman.json" "$cpu_user" "$cpu_sys"
 done
+
+if [[ -n "$IGNORE_PARALLEL_BIN" ]]; then
+  for w in "${WLIST[@]}"; do
+    echo "=== ignore-parallel-cli (Rust, ignore::WalkParallel, workers=$w) ==="
+    CMD="$IGNORE_PARALLEL_BIN --quiet --workers $w '$TREE'"
+    hyperfine --warmup "$WARMUP" --min-runs "$MIN_RUNS" --export-json "$SCRATCH/hf_ignore_parallel.json" "$CMD"
+    IFS=',' read -r cpu_user cpu_sys <<< "$(capture_cpu_time "$CMD")"
+    write_row "ignore-parallel" "$w" "$SCRATCH/hf_ignore_parallel.json" "$cpu_user" "$cpu_sys"
+  done
+fi
 
 echo "results written to $OUT"
 column -s, -t "$OUT"

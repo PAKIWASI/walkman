@@ -30,7 +30,7 @@
 - Per-directory error reporting that doesn't abort unrelated work
 - Skip entries by name (prunes matching directories), optional max depth, optional symlink following
 - Optional atomic traversal statistics
-- Benchmark suite vs `filepath.WalkDir` and Rust's `walkdir` crate, plus a synthetic tree generator (wide/deep/mixed)
+- Benchmark suite vs `filepath.WalkDir`, Rust's sequential `walkdir` crate, and Rust's parallel `ignore::WalkParallel` (the ripgrep walker), plus a synthetic tree generator (wide/deep/mixed)
 
 ## Installation
 
@@ -154,7 +154,10 @@ The pool itself lives in [`github.com/PAKIWASI/workstealpool`](https://github.co
 
 ## CLI tools
 
-A Go CLI (`main/`) and a Rust reference CLI (`rust_walkdir/`, wrapping the [`walkdir`](https://crates.io/crates/walkdir) crate) share matching options for comparison.
+A Go CLI (`main/`) and two Rust reference CLIs share matching options for comparison:
+
+- `rust_walkdir/`, wrapping the [`walkdir`](https://crates.io/crates/walkdir) crate — sequential, single-threaded baseline.
+- `rust_ignore_parallel/`, wrapping the [`ignore`](https://crates.io/crates/ignore) crate's `WalkBuilder::build_parallel()` (the walker ripgrep itself uses) — a multi-threaded walker, so it's the more relevant comparison for `walkman` than the sequential one is. All of `ignore`'s ripgrep-style filtering (`.gitignore`, hidden files, git excludes) is explicitly disabled so it walks the raw tree, same as `walkdir-cli` and `walkman`.
 
 ```bash
 go build -o build/main ./main
@@ -172,8 +175,13 @@ go build -o build/main ./main
 ```
 
 ```bash
-cd rust_walkdir && cargo build --release   # produces build/walkdir-cli
+cd rust_walkdir && cargo build --release            # produces build/walkdir-cli
+cd rust_ignore_parallel && cargo build --release    # produces build/ignore-parallel-cli
 ```
+
+`ignore-parallel-cli` takes the same flags as `walkdir-cli` plus `--workers N` (thread count, `0` = `available_parallelism`), matching `walkman`'s flag so it sweeps the same way in `bench_harness.sh`.
+
+> **Toolchain note:** the pinned `ignore = "=0.4.16"` / `globset = "0.4.16"` in `rust_ignore_parallel/Cargo.toml` and `Cargo.lock` are deliberate — newer `ignore`/`globset` releases require the `edition2024` Cargo feature, which needs a much newer Rust toolchain (roughly 1.85+) than older distro-packaged `rustc`/`cargo` (e.g. Ubuntu's apt package is 1.75) ship. If you have a newer toolchain, feel free to `cargo update` and drop the pins.
 
 ## Benchmarks
 
@@ -198,11 +206,21 @@ Same deterministic wide tree (**1,884 dirs, 11,304 files**), Intel i5-1135G7, me
 | 4 | 4.1 ms |
 | 8 | **3.2 ms** |
 
-CLI timing plateaus/regresses past 4 workers (process overhead dominates); the pool itself keeps scaling to 8. Reproduce with:
+CLI timing plateaus/regresses past 4 workers (process overhead dominates); the pool itself keeps scaling to 8.
+
+> The table above predates `rust_ignore_parallel/`. Rerun `bench_harness.sh` with `--ignore-parallel` (added below) to get `ignore::WalkParallel` numbers on your own hardware alongside these — a same-machine, same-tree, same-harness run is the only fair comparison, so no `ignore-parallel` numbers are hardcoded here.
+
+Reproduce with:
 
 ```bash
 ./test/build_tree.sh --shape wide --root /tmp/tree_wide --seed 42
-./test/bench_harness.sh --walkman ./build/main --walkdir ./build/walkdir-cli --tree /tmp/tree_wide --workers "1,2,4,8" --out test/results_wide.csv
+./test/bench_harness.sh \
+  --walkman          ./build/main \
+  --walkdir          ./build/walkdir-cli \
+  --ignore-parallel  ./build/ignore-parallel-cli \
+  --tree             /tmp/tree_wide \
+  --workers          "1,2,4,8" \
+  --out              test/results_wide.csv
 WALKMAN_BENCH_ROOT=/tmp/tree_wide go test -bench=WorkerSweep -benchmem -count=10 ./...
 ```
 
@@ -239,7 +257,8 @@ walkman/
 ├── walkman_bench_test.go           # benchmark suite
 ├── walkman_worker_sweep_test.go    # WorkerSweep benchmark
 ├── main/main.go                    # Go CLI / benchmark wrapper
-├── rust_walkdir/src/main.rs        # comparable Rust walkdir wrapper
+├── rust_walkdir/src/main.rs        # comparable Rust walkdir wrapper (sequential)
+├── rust_ignore_parallel/src/main.rs # comparable Rust ignore::WalkParallel wrapper
 ├── build/build_tree.sh             # simple synthetic-tree generator
 ├── test/                           # benchmark harness + recorded logs
 └── help.md                         # project notes / implementation plan
