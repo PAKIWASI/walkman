@@ -168,6 +168,12 @@ for shape in "${SHAPE_LIST[@]}"; do
   fi
 done
 
+
+# Cleanup
+
+rm -rf /tmp/tree*
+
+
 echo "" >&2
 echo "all done. results in $OUT_DIR/:" >&2
 ls -la "$OUT_DIR" >&2
