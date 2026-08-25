@@ -222,4 +222,3 @@ if [[ -n "$IGNORE_PARALLEL_BIN" ]]; then
 fi
 
 echo "results written to $OUT" >&2
-echo "summarize with: ./perf_summary.py $OUT" >&2
