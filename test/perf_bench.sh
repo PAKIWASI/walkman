@@ -166,7 +166,7 @@ def grab(pattern):
         return ""
     return m.group(1).replace(",", "")
 
-task_clock = grab(r"([\d.]+)\s+msec task-clock")
+task_clock = grab(r"([\d,]+\.[\d]+)\s+msec task-clock")
 wall = grab(r"([\d.]+)\s+seconds time elapsed")
 ctx_sw = grab(r"([\d,]+)\s+context-switches")
 migrations = grab(r"([\d,]+)\s+cpu-migrations")
@@ -207,5 +207,32 @@ for w in "${WLIST[@]}"; do
     "ignore-parallel" "$w" \
     "$IGNORE_PARALLEL_BIN" --quiet --workers "$w" "$TREE"
 done
+
+# Integrity check: context-switches and cpu-migrations are software events
+# that should always work per the header comment above, but some
+# containers/sandboxes silently restrict them (return a bare 0 instead of
+# erroring or printing "<not supported>") while still allowing task-clock
+# and page-faults through. A literal 0 on every single run — including
+# multi-worker runs, which cannot avoid at least some scheduling activity
+# — is a strong signal that's what happened here, not a genuine
+# zero-contention result. Catch it now instead of relying on someone
+# eyeballing the CSV later.
+check_all_zero() {
+  local col="$1" label="$2"
+  local nonzero_count
+  nonzero_count=$(awk -F, -v c="$col" 'NR>1 && $c!="" && $c+0!=0 {n++} END{print n+0}' "$OUT")
+  if [[ "$nonzero_count" -eq 0 ]]; then
+    echo "" >&2
+    echo "warning: every '$label' value in $OUT is 0 (or blank). This almost" >&2
+    echo "  certainly means the environment is silently restricting this specific" >&2
+    echo "  perf software event rather than perf reporting a genuine zero —" >&2
+    echo "  common in containers/sandboxes/CI that allow task-clock and" >&2
+    echo "  page-faults but not scheduler-tracepoint-based counters. The" >&2
+    echo "  '$label' column in $OUT should not be trusted." >&2
+    echo "  Try: sudo sysctl kernel.perf_event_paranoid=-1  (or re-run as root/with CAP_PERFMON)" >&2
+  fi
+}
+check_all_zero 6 "context-switches"
+check_all_zero 7 "cpu-migrations"
 
 echo "results written to $OUT" >&2

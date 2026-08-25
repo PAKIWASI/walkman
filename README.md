@@ -30,7 +30,7 @@
 - Per-directory error reporting that doesn't abort unrelated work
 - Skip entries by name (prunes matching directories), optional max depth, optional symlink following
 - Optional atomic traversal statistics
-- Benchmark suite vs `filepath.WalkDir` and Rust's parallel `ignore::WalkParallel` (the ripgrep walker), plus a synthetic tree generator (wide/deep/mixed). Rust's sequential `walkdir` crate was also benchmarked early on — walkman won decisively and consistently — and has since been dropped from the ongoing suite; see [Benchmarks](#benchmarks).
+- Benchmark suite vs Rust's parallel `ignore::WalkParallel`, with a synthetic tree generator across wide/deep/mixed shapes — see [Benchmarks](#benchmarks)
 
 ## Installation
 
@@ -184,62 +184,55 @@ cd rust_ignore_parallel && cargo build --release    # produces build/ignore-para
 
 ## Benchmarks
 
-Same deterministic wide tree (**1,884 dirs, 11,304 files**), Intel i5-1135G7, measured two ways.
+`walkman` (Go) vs Rust's parallel `ignore::WalkParallel` (the ripgrep walker), across three synthetic tree shapes, Intel i5-1135G7. Rust's *sequential* `walkdir` crate was dropped from the ongoing suite after early runs — walkman beat it decisively and consistently every time, which stopped being an interesting result to keep re-measuring once a real parallel competitor was in the mix.
 
-> **Note on Rust's sequential `walkdir` crate:** it was included in early benchmark runs as an initial sanity baseline. walkman beat it decisively and consistently across every tree shape and worker count tested — see the historical numbers in the collapsed section below. Since it's single-threaded by design, "walkman beats a sequential walker" isn't an interesting result to keep re-measuring, so `walkdir-cli` has been removed from the benchmark suite, test harnesses, and build tooling. The comparison that actually matters, and the only one still tracked going forward, is walkman vs Rust's **parallel** walker, `ignore::WalkParallel`.
+| Shape | Dirs | Files | What it stresses |
+| --- | ---: | ---: | --- |
+| `wide` | 1,884 | 11,304 | shallow, high branching — lots of independent, stealable work |
+| `mixed` | 19,530 | 78,120 | moderate depth/branching — closer to a real source tree |
+| `deep` | 524,286 | 1,048,572 | deep, low branching — long dependency chains, little to steal |
 
-<details>
-<summary>Historical walkdir-cli numbers (no longer run; kept for reference)</summary>
+**Wall-clock mean, ms (`hyperfine`, full process per run, `--min-runs 15 --warmup 5`):**
 
-| Walker | Workers | Mean |
-| --- | ---: | ---: |
-| Rust `walkdir` (sequential) | seq | 17.4 ms |
-| `walkman` | 4 | 5.2 ms |
+| Workers | `wide` walkman | `wide` ignore | `mixed` walkman | `mixed` ignore | `deep` walkman | `deep` ignore |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 12.5 | 20.7 | 112.0 | 104.9 | 2,869 | 2,184 |
+| 2 | 7.2 | 13.9 | 67.6 | 57.2 | 1,709 | 1,138 |
+| 4 | **5.1** | 9.6 | 41.3 | **29.2** | 1,039 | 625 |
+| 8 | 7.9 | 9.2 | 32.8 | **28.1** | 829 | **461** |
 
-walkman was ~3.3x faster than sequential `walkdir` at its best worker count, on this tree. Full historical breakdown available in prior commits' README revisions and `test/*.log`.
+Takeaways:
+- **`wide`** — walkman wins outright at every worker count (best: 5.1ms at 4 workers vs 9.2ms for `ignore` at its best). Both regress past 4 workers here; the tree is too small to amortize more worker-pool overhead.
+- **`mixed`** — walkman is ahead at 1 worker, `ignore` pulls ahead and stays ahead from 4 workers on.
+- **`deep`** — `ignore` wins at every worker count, and the gap widens with more workers (461ms vs 829ms at 8).
 
-</details>
+**Allocation pressure (`perf stat`, workers=1, mean of 15 runs):**
 
-**CLI (`hyperfine`, full process per run):**
+| Shape | walkman page-faults | ignore page-faults | walkman cache-misses | ignore cache-misses |
+| --- | ---: | ---: | ---: | ---: |
+| `wide` | 162 | 106 | 22.3K | 5.9K |
+| `mixed` | 483 | 107 | 88.6K | 14.8K |
+| `deep` | 4,481 | 108 | 1.23M | 262.7K |
 
-| Walker | Workers | Mean |
-| --- | ---: | ---: |
-| Rust `ignore::WalkParallel` | 1 | 19.7 ms |
-| Rust `ignore::WalkParallel` | 2 | 17.7 ms |
-| Rust `ignore::WalkParallel` | 4 | 20.2 ms |
-| Rust `ignore::WalkParallel` | 8 | 21.3 ms |
-| `walkman` | 1 | 12.1 ms |
-| `walkman` | 2 | 7.3 ms |
-| `walkman` | 4 | **5.2 ms** |
-| `walkman` | 8 | 7.6 ms |
+walkman faults and cache-misses noticeably more than `ignore` everywhere, and the gap grows with tree size (~40x more page-faults on `deep`). This is the likely explanation for why `ignore` pulls further ahead as trees get deeper: whatever allocation `walkman` does per directory doesn't stay flat.
 
-**In-process (`go test -bench=WorkerSweep -count=10`):**
-
-| Workers | Mean |
-| --- | ---: |
-| 1 | 11.9 ms |
-| 2 | 6.9 ms |
-| 4 | 4.2 ms |
-| 8 | **3.2 ms** |
-
-CLI timing plateaus/regresses past 4 workers (process overhead dominates); the in-process pool keeps scaling to 8. `ignore::WalkParallel` doesn't scale on this tree at all — its wall-clock is flat-to-worse from 1→8 workers while its own CPU time climbs steadily (9 → 20 → 40 → 57 ms user), the signature of fixed per-call thread-pool spin-up/teardown cost that a tree this size can't amortize.
+> **Data-quality note:** `test/perf_bench.sh` had a regex bug where `task-clock` values ≥1000ms lost their leading digit(s) to perf's thousands-separator formatting (e.g. `2,924.90` parsed as `924.90`) — this only affected the `task_clock_ms` column on the `deep` shape and is now fixed, but the `deep` CPU-time-from-perf numbers in `test/bench_results/perf_deep.csv` predate the fix and can't be recovered after the fact (the lost digits aren't in the file). `context-switches` and `cpu-migrations` also read as a literal `0` across every single run in this environment, including 8-worker runs — almost certainly a sandbox/container restriction on those specific counters rather than genuine zero contention, so those two columns aren't trustworthy either. Wall-clock (`hyperfine`), page-faults, cache-misses, cycles, and instructions are unaffected by both issues. Re-run `test/run_all.sh` to get clean `deep` CPU-time numbers.
 
 Reproduce with:
 
 ```bash
-./test/build_tree.sh --shape wide --root /tmp/tree_wide --seed 42
-./test/bench_harness.sh \
-  --walkman          ./build/main \
-  --ignore-parallel  ./build/ignore-parallel-cli \
-  --tree             /tmp/tree_wide \
-  --workers          "1,2,4,8" \
-  --out              test/results_wide.csv
-WALKMAN_BENCH_ROOT=/tmp/tree_wide go test -bench=WorkerSweep -benchmem -count=10 ./...
+cd test
+./run_all.sh \
+  --walkman          ../build/main \
+  --ignore-parallel  ../build/ignore-parallel-cli \
+  --workers          "1,2,4,$(nproc)" \
+  --runs             15 \
+  --out-dir          bench_results
 ```
 
-`ignore-parallel-cli` build pin (see `rust_ignore_parallel/Cargo.toml`): built with `rustc`/`cargo` 1.75.0, `ignore = "=0.4.16"`, `globset` pinned to `0.4.16` — newer releases of both require the `edition2024` Cargo feature (~1.85+ toolchain). `--release` profile, `opt-level = 3`, `lto = true`.
+Or run one shape/harness at a time with `build_tree.sh` + `bench_harness.sh` (hyperfine) / `perf_bench.sh` (perf counters) — see each script's `--help`.
 
-Raw logs are in `test/*.log`.
+`ignore-parallel-cli` build pin: `rustc`/`cargo` 1.75.0, `ignore = "=0.4.16"`, `globset` pinned to `0.4.16` (newer releases require the `edition2024` Cargo feature, ~1.85+ toolchain), `--release` profile, `opt-level = 3`, `lto = true`.
 
 ## Testing
 
@@ -274,9 +267,14 @@ walkman/
 ├── main/main.go                    # Go CLI / benchmark wrapper
 ├── rust_walkdir/src/main.rs        # comparable Rust walkdir wrapper (sequential)
 ├── rust_ignore_parallel/src/main.rs # comparable Rust ignore::WalkParallel wrapper
-├── build/build_tree.sh             # simple synthetic-tree generator
-├── test/                           # benchmark harness + recorded logs
-└── help.md                         # project notes / implementation plan
+├── build/                          # built binaries (main, walkdir-cli, ignore-parallel-cli)
+├── test/
+│   ├── build_tree.sh               # synthetic tree generator (wide/deep/mixed)
+│   ├── bench_harness.sh            # hyperfine wall-clock sweep
+│   ├── perf_bench.sh               # perf-counter sweep
+│   ├── run_all.sh                  # runs both harnesses across all three shapes
+│   └── bench_results/              # recorded CSVs + run_manifest.txt
+└── Roadmap.md                      # feature roadmap / implementation notes
 ```
 
 ## License
