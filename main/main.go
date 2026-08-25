@@ -52,8 +52,8 @@ func main() {
 
 	pc := walkman.PoolConfig{
 		PoolSize:         *workers,
-		InitialWorkerCap: 32,
-		ResultBuffSize:   64,
+		InitialWorkerCap: 64,
+		ResultBuffSize:   128,
 	}
 	if pc.PoolSize == 0 {
 		pc.PoolSize = runtime.GOMAXPROCS(0)

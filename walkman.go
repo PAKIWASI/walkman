@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"sync/atomic"
 
 	wsp "github.com/PAKIWASI/workstealpool"
@@ -70,7 +69,7 @@ type PoolConfig struct {
 func DefaultPoolConfig() PoolConfig {
 	return PoolConfig{
 		PoolSize:         runtime.GOMAXPROCS(0),
-		InitialWorkerCap: 32,
+		InitialWorkerCap: 32, // TODO: experiment with these numbers
 		ResultBuffSize:   64,
 	}
 }
@@ -79,34 +78,6 @@ type Walkman struct {
 	conf  walkConf
 	stats walkStats
 	pool  *wsp.WorkerPool[walkItem, WalkResult]
-}
-
-// readDir opens name and reads every entry in it, unsorted. Deliberately
-// using the File.ReadDir(-1) form rather than the package-level os.ReadDir,
-// which sorts by filename. That sort is wasted work here since results
-// are consumed by directory, not in a global sorted order anyway.
-func readDir(name string) ([]fs.DirEntry, error) {
-	f, err := os.Open(name)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	return f.ReadDir(-1)
-}
-
-// join builds a child path from an already-clean parent and a bare entry
-// name (never containing a separator). Deliberately not filepath.Join:
-// that's variadic (a slice alloc) and re-runs filepath.Clean on the
-// result, which is wasted work once the parent is already clean
-func join(dir, name string) string {
-	if dir == "" {
-		return name
-	}
-	if dir[len(dir)-1] == os.PathSeparator {
-		return dir + name
-	}
-	return dir + string(os.PathSeparator) + name
 }
 
 // NewWalkman builds a Walkman with GOMAXPROCS-based pool sizing and stats
@@ -147,6 +118,34 @@ func NewWalkmanWithConfig(
 	return w
 }
 
+// readDir opens name and reads every entry in it, unsorted. Deliberately
+// using the File.ReadDir(-1) form rather than the package-level os.ReadDir,
+// which sorts by filename. That sort is wasted work here since results
+// are consumed by directory, not in a global sorted order anyway.
+func readDir(name string) ([]fs.DirEntry, error) {
+	f, err := os.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	return f.ReadDir(-1)
+}
+
+// join builds a child path from an already-clean parent and a bare entry
+// name (never containing a separator). Deliberately not filepath.Join:
+// that's variadic (a slice alloc) and re-runs filepath.Clean on the
+// result, which is wasted work once the parent is already clean
+func join(dir, name string) string {
+	if dir == "" {
+		return name
+	}
+	if dir[len(dir)-1] == os.PathSeparator {
+		return dir + name
+	}
+	return dir + string(os.PathSeparator) + name
+}
+
 // visit is the Task run for every directory the walk encounters. It is
 // called concurrently, from any worker in the pool for different items—
 // so it must not touch anything on Walkman that isn't safe for that
@@ -159,12 +158,24 @@ func (w *Walkman) visit(ctx context.Context, item walkItem, spawn func(walkItem)
 		return &WalkResult{Dir: item.path, Err: err}, nil
 	}
 
+	// TODO: test for correctness on this section
+
 	before := len(dirs)
-	// TODO: do a swapdelete here, this seems inefficient
-	dirs = slices.DeleteFunc(dirs, func(d fs.DirEntry) bool {
-		_, skip := w.conf.skipSet[d.Name()]
-		return skip
-	})
+	deleted := 0
+
+	// swap delete
+	for i := range dirs {
+		_, present := w.conf.skipSet[dirs[i].Name()]
+		if present {
+			dirs[i] = dirs[len(dirs)-1] // move last element into deleted spot (order is unimportant)
+			deleted++
+		}
+	}
+
+	// get another view into the same array (no new allocation) but with less length (we deleted some elms)
+	dirs = dirs[:before - deleted]
+
+
 	if w.conf.trackStats {
 		w.stats.skipped.Add(uint32(before - len(dirs)))
 	}
@@ -211,6 +222,7 @@ func (w *Walkman) visit(ctx context.Context, item walkItem, spawn func(walkItem)
 			continue
 		}
 
+		// TODO: we should note stats and only do one if w.conf.trackStats call and set it all
 		if w.conf.trackStats {
 			w.stats.dirs.Add(1)
 		}
