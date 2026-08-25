@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# perf_bench.sh — perf stat-based comparison of walkman vs walkdir-cli vs
+# perf_bench.sh — perf stat-based comparison of walkman vs
 # ignore-parallel-cli, run from walkman/walkman/test/ (or point --*-bin at
 # built binaries anywhere).
 #
@@ -29,7 +29,6 @@
 #
 #   ./perf_bench.sh \
 #       --walkman          ../build/main \
-#       --walkdir          ../build/walkdir-cli \
 #       --ignore-parallel  ../build/ignore-parallel-cli \
 #       --tree             /tmp/tree_wide \
 #       --workers          "1,2,4,$(nproc)" \
@@ -39,7 +38,6 @@
 set -euo pipefail
 
 WALKMAN_BIN=""
-WALKDIR_BIN=""
 IGNORE_PARALLEL_BIN=""
 TREE=""
 WORKERS="1,2,4,$(nproc 2>/dev/null || echo 4)"
@@ -50,7 +48,6 @@ OUT="perf_results.csv"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --walkman) WALKMAN_BIN="$2"; shift 2 ;;
-    --walkdir) WALKDIR_BIN="$2"; shift 2 ;;
     --ignore-parallel) IGNORE_PARALLEL_BIN="$2"; shift 2 ;;
     --tree)    TREE="$2"; shift 2 ;;
     --workers) WORKERS="$2"; shift 2 ;;
@@ -62,7 +59,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-for req in WALKMAN_BIN WALKDIR_BIN TREE; do
+for req in WALKMAN_BIN IGNORE_PARALLEL_BIN TREE; do
   if [[ -z "${!req}" ]]; then
     echo "missing required --${req,,} (see --help)" >&2; exit 1
   fi
@@ -198,10 +195,6 @@ bench_tool() {
   done
 }
 
-bench_tool "walkdir-cli (Rust, sequential — reference point)" \
-  "walkdir" "-" \
-  "$WALKDIR_BIN" --quiet "$TREE"
-
 IFS=',' read -ra WLIST <<< "$WORKERS"
 for w in "${WLIST[@]}"; do
   bench_tool "walkman (Go, workers=$w)" \
@@ -209,12 +202,10 @@ for w in "${WLIST[@]}"; do
     "$WALKMAN_BIN" --quiet --workers "$w" "$TREE"
 done
 
-if [[ -n "$IGNORE_PARALLEL_BIN" ]]; then
-  for w in "${WLIST[@]}"; do
-    bench_tool "ignore-parallel-cli (Rust, ignore::WalkParallel, workers=$w)" \
-      "ignore-parallel" "$w" \
-      "$IGNORE_PARALLEL_BIN" --quiet --workers "$w" "$TREE"
-  done
-fi
+for w in "${WLIST[@]}"; do
+  bench_tool "ignore-parallel-cli (Rust, ignore::WalkParallel, workers=$w)" \
+    "ignore-parallel" "$w" \
+    "$IGNORE_PARALLEL_BIN" --quiet --workers "$w" "$TREE"
+done
 
 echo "results written to $OUT" >&2

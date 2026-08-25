@@ -30,7 +30,7 @@
 - Per-directory error reporting that doesn't abort unrelated work
 - Skip entries by name (prunes matching directories), optional max depth, optional symlink following
 - Optional atomic traversal statistics
-- Benchmark suite vs `filepath.WalkDir`, Rust's sequential `walkdir` crate, and Rust's parallel `ignore::WalkParallel` (the ripgrep walker), plus a synthetic tree generator (wide/deep/mixed)
+- Benchmark suite vs `filepath.WalkDir` and Rust's parallel `ignore::WalkParallel` (the ripgrep walker), plus a synthetic tree generator (wide/deep/mixed). Rust's sequential `walkdir` crate was also benchmarked early on — walkman won decisively and consistently — and has since been dropped from the ongoing suite; see [Benchmarks](#benchmarks).
 
 ## Installation
 
@@ -181,17 +181,29 @@ cd rust_ignore_parallel && cargo build --release    # produces build/ignore-para
 
 `ignore-parallel-cli` takes the same flags as `walkdir-cli` plus `--workers N` (thread count, `0` = `available_parallelism`), matching `walkman`'s flag so it sweeps the same way in `bench_harness.sh`.
 
-> **Toolchain note:** the pinned `ignore = "=0.4.16"` / `globset = "0.4.16"` in `rust_ignore_parallel/Cargo.toml` and `Cargo.lock` are deliberate — newer `ignore`/`globset` releases require the `edition2024` Cargo feature, which needs a much newer Rust toolchain (roughly 1.85+) than older distro-packaged `rustc`/`cargo` (e.g. Ubuntu's apt package is 1.75) ship. If you have a newer toolchain, feel free to `cargo update` and drop the pins.
 
 ## Benchmarks
 
 Same deterministic wide tree (**1,884 dirs, 11,304 files**), Intel i5-1135G7, measured two ways.
 
+> **Note on Rust's sequential `walkdir` crate:** it was included in early benchmark runs as an initial sanity baseline. walkman beat it decisively and consistently across every tree shape and worker count tested — see the historical numbers in the collapsed section below. Since it's single-threaded by design, "walkman beats a sequential walker" isn't an interesting result to keep re-measuring, so `walkdir-cli` has been removed from the benchmark suite, test harnesses, and build tooling. The comparison that actually matters, and the only one still tracked going forward, is walkman vs Rust's **parallel** walker, `ignore::WalkParallel`.
+
+<details>
+<summary>Historical walkdir-cli numbers (no longer run; kept for reference)</summary>
+
+| Walker | Workers | Mean |
+| --- | ---: | ---: |
+| Rust `walkdir` (sequential) | seq | 17.4 ms |
+| `walkman` | 4 | 5.2 ms |
+
+walkman was ~3.3x faster than sequential `walkdir` at its best worker count, on this tree. Full historical breakdown available in prior commits' README revisions and `test/*.log`.
+
+</details>
+
 **CLI (`hyperfine`, full process per run):**
 
 | Walker | Workers | Mean |
 | --- | ---: | ---: |
-| Rust `walkdir` | seq | 17.4 ms |
 | Rust `ignore::WalkParallel` | 1 | 19.7 ms |
 | Rust `ignore::WalkParallel` | 2 | 17.7 ms |
 | Rust `ignore::WalkParallel` | 4 | 20.2 ms |
@@ -210,7 +222,7 @@ Same deterministic wide tree (**1,884 dirs, 11,304 files**), Intel i5-1135G7, me
 | 4 | 4.2 ms |
 | 8 | **3.2 ms** |
 
-CLI timing plateaus/regresses past 4 workers (process overhead dominates); the in-process pool keeps scaling to 8. `ignore::WalkParallel` doesn't scale on this tree at all — its wall-clock is flat-to-worse from 1→8 workers while its own CPU time climbs steadily (9 → 20 → 40 → 57 ms user), the signature of fixed per-call thread-pool spin-up/teardown cost that a tree this size can't amortize. On a much larger, real-world tree (`/`, ~1M entries) `walkman` still pulled ahead by ~2.8x wall-clock while using 674% CPU vs `ignore::WalkParallel`'s 197% — so the gap isn't a small-tree artifact, though that run isn't a controlled/reproducible benchmark the way the synthetic tree above is.
+CLI timing plateaus/regresses past 4 workers (process overhead dominates); the in-process pool keeps scaling to 8. `ignore::WalkParallel` doesn't scale on this tree at all — its wall-clock is flat-to-worse from 1→8 workers while its own CPU time climbs steadily (9 → 20 → 40 → 57 ms user), the signature of fixed per-call thread-pool spin-up/teardown cost that a tree this size can't amortize.
 
 Reproduce with:
 
@@ -218,7 +230,6 @@ Reproduce with:
 ./test/build_tree.sh --shape wide --root /tmp/tree_wide --seed 42
 ./test/bench_harness.sh \
   --walkman          ./build/main \
-  --walkdir          ./build/walkdir-cli \
   --ignore-parallel  ./build/ignore-parallel-cli \
   --tree             /tmp/tree_wide \
   --workers          "1,2,4,8" \
@@ -226,9 +237,9 @@ Reproduce with:
 WALKMAN_BENCH_ROOT=/tmp/tree_wide go test -bench=WorkerSweep -benchmem -count=10 ./...
 ```
 
-`ignore-parallel-cli` build pin (see `rust_ignore_parallel/Cargo.toml`): built with `rustc`/`cargo` 1.75.0, `ignore = "=0.4.16"`, `globset` pinned to `0.4.16` — newer releases of both require the `edition2024` Cargo feature (~1.85+ toolchain). `--release` profile, `opt-level = 3`, `lto = true`, matching `walkdir-cli`'s profile.
+`ignore-parallel-cli` build pin (see `rust_ignore_parallel/Cargo.toml`): built with `rustc`/`cargo` 1.75.0, `ignore = "=0.4.16"`, `globset` pinned to `0.4.16` — newer releases of both require the `edition2024` Cargo feature (~1.85+ toolchain). `--release` profile, `opt-level = 3`, `lto = true`.
 
-Raw logs (including million-file runs) are in `test/*.log`.
+Raw logs are in `test/*.log`.
 
 ## Testing
 

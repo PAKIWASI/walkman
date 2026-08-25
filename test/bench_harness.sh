@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# bench_harness.sh — fair, statistically-rigorous walkman vs walkdir-cli comparison.
+# bench_harness.sh — fair, statistically-rigorous walkman vs
+# ignore::WalkParallel comparison.
 #
 # What this fixes vs the hand-rolled --bench N loop in main.go / main.rs:
 #
@@ -20,17 +21,14 @@
 #
 #   4. Wall-clock alone hides total CPU cost. A worker pool can win on
 #      wall time while burning more aggregate core-seconds — that's a
-#      completely reasonable trade (per your point: idle cores are
-#      wasted, so spending more total CPU for less wall time is usually
-#      a win) but it should be a number you can SEE, not an assumption.
-#      This script captures user+sys time per run via `/usr/bin/time`
-#      alongside hyperfine's wall-clock numbers.
+#      completely reasonable trade (idle cores are wasted, so spending
+#      more total CPU for less wall time is usually a win) but it should
+#      be a number you can SEE, not an assumption. This script captures
+#      user+sys time per run alongside hyperfine's wall-clock numbers.
 #
 #   5. Single worker-count snapshot. This sweeps --workers across
 #      1,2,4,8,$(nproc) (configurable) so you get the actual scaling
-#      curve, not one point on it — which is what tells you whether
-#      you're still climbing or already past the plateau the walkman.go
-#      comment mentions for workstealpool.
+#      curve, not one point on it.
 #
 # Requires: hyperfine (https://github.com/sharkdp/hyperfine), zsh (for the
 # `time` builtin used to capture user+sys CPU seconds — bash's own `time`
@@ -42,23 +40,14 @@
 #   ./build_tree.sh --shape wide  --root /tmp/tree_wide  --seed 42
 #   ./bench_harness.sh \
 #       --walkman          ../build/main \
-#       --walkdir          ../build/walkdir-cli \
 #       --ignore-parallel  ../build/ignore-parallel-cli \
 #       --tree             /tmp/tree_wide \
 #       --workers          "1,2,4,$(nproc)" \
 #       --out              results_wide.csv
-#
-# --ignore-parallel is optional: omit it (or the binary won't be built) and
-# the harness just runs walkman vs walkdir-cli as before. When given, it's
-# swept across the same --workers list as walkman, since (unlike
-# walkdir-cli's single sequential pass) it's a parallel walker too and the
-# comparison walkman actually wants is against another multi-threaded
-# walker, not just the sequential baseline.
 
 set -euo pipefail
 
 WALKMAN_BIN=""
-WALKDIR_BIN=""
 IGNORE_PARALLEL_BIN=""
 TREE=""
 WORKERS="1,2,4,$(nproc 2>/dev/null || echo 4)"
@@ -70,7 +59,6 @@ COLD=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --walkman) WALKMAN_BIN="$2"; shift 2 ;;
-    --walkdir) WALKDIR_BIN="$2"; shift 2 ;;
     --ignore-parallel) IGNORE_PARALLEL_BIN="$2"; shift 2 ;;
     --tree)    TREE="$2"; shift 2 ;;
     --workers) WORKERS="$2"; shift 2 ;;
@@ -83,7 +71,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-for req in WALKMAN_BIN WALKDIR_BIN TREE; do
+for req in WALKMAN_BIN IGNORE_PARALLEL_BIN TREE; do
   if [[ -z "${!req}" ]]; then
     echo "missing required --${req,,} (see --help)" >&2; exit 1
   fi
@@ -130,12 +118,12 @@ fi
 echo "tool,workers,mean_wall_s,stddev_wall_s,min_wall_s,max_wall_s,user_s,sys_s" > "$OUT"
 
 # Private per-run scratch dir instead of fixed /tmp filenames. Fixed names
-# (e.g. /tmp/_hf_walkdir.json) are a collision/permission hazard: a
-# leftover file from a prior run — especially one invoked under sudo, or
-# by another user/cron job — can be left owned by someone else, and /tmp's
-# sticky bit then blocks us from removing or overwriting it. mktemp -d
-# gives us a directory only we own, and the trap guarantees cleanup even
-# if the script errors out partway through.
+# are a collision/permission hazard: a leftover file from a prior run —
+# especially one invoked under sudo, or by another user/cron job — can be
+# left owned by someone else, and /tmp's sticky bit then blocks us from
+# removing or overwriting it. mktemp -d gives us a directory only we own,
+# and the trap guarantees cleanup even if the script errors out partway
+# through.
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/bench_harness.XXXXXX")"
 trap 'rm -rf "$SCRATCH"' EXIT
 
@@ -143,12 +131,6 @@ capture_cpu_time() {
   # One extra untimed-by-hyperfine run purely to get user/sys aggregate
   # CPU seconds, since hyperfine itself only reports wall clock. Run
   # after the hyperfine measurement so it doesn't perturb it.
-  #
-  # Uses zsh's `time` builtin with TIMEFMT set to just "%U %S" — the
-  # command's own stdout/stderr are discarded *inside* the timed group,
-  # so the only thing landing in $cpu_out is zsh's own timing report,
-  # not a mix of the two (which is what silently corrupted the CSV via
-  # `sed` before this was rewritten to write whole rows in Python).
   local cmd="$1"
   local cpu_out="$SCRATCH/cpu_time.$$"
   if [[ -n "$ZSH_BIN" ]]; then
@@ -162,8 +144,7 @@ capture_cpu_time() {
 }
 
 # Writes one finished CSV row (hyperfine stats + CPU time together), so
-# there's no separate patch-the-row-after-the-fact step and thus nothing
-# for a `sed` pattern (or a stray `/` in $cpu) to collide with.
+# there's no separate patch-the-row-after-the-fact step.
 write_row() {
   local tool="$1" workers="$2" json_file="$3" user="$4" sys="$5"
   python3 - "$OUT" "$tool" "$workers" "$json_file" "$user" "$sys" <<'PYEOF'
@@ -175,13 +156,8 @@ with open(out, "a") as f:
 PYEOF
 }
 
-echo "=== walkdir-cli (Rust, sequential — reference point) ==="
-CMD="$WALKDIR_BIN --quiet '$TREE'"
-hyperfine --warmup "$WARMUP" --min-runs "$MIN_RUNS" --export-json "$SCRATCH/hf_walkdir.json" "$CMD"
-IFS=',' read -r cpu_user cpu_sys <<< "$(capture_cpu_time "$CMD")"
-write_row "walkdir" "-" "$SCRATCH/hf_walkdir.json" "$cpu_user" "$cpu_sys"
-
 IFS=',' read -ra WLIST <<< "$WORKERS"
+
 for w in "${WLIST[@]}"; do
   echo "=== walkman (Go, workers=$w) ==="
   CMD="$WALKMAN_BIN --quiet --workers $w '$TREE'"
@@ -190,15 +166,18 @@ for w in "${WLIST[@]}"; do
   write_row "walkman" "$w" "$SCRATCH/hf_walkman.json" "$cpu_user" "$cpu_sys"
 done
 
-if [[ -n "$IGNORE_PARALLEL_BIN" ]]; then
-  for w in "${WLIST[@]}"; do
-    echo "=== ignore-parallel-cli (Rust, ignore::WalkParallel, workers=$w) ==="
-    CMD="$IGNORE_PARALLEL_BIN --quiet --workers $w '$TREE'"
-    hyperfine --warmup "$WARMUP" --min-runs "$MIN_RUNS" --export-json "$SCRATCH/hf_ignore_parallel.json" "$CMD"
-    IFS=',' read -r cpu_user cpu_sys <<< "$(capture_cpu_time "$CMD")"
-    write_row "ignore-parallel" "$w" "$SCRATCH/hf_ignore_parallel.json" "$cpu_user" "$cpu_sys"
-  done
-fi
+for w in "${WLIST[@]}"; do
+  echo "=== ignore-parallel-cli (Rust, ignore::WalkParallel, workers=$w) ==="
+  CMD="$IGNORE_PARALLEL_BIN --quiet --workers $w '$TREE'"
+  hyperfine --warmup "$WARMUP" --min-runs "$MIN_RUNS" --export-json "$SCRATCH/hf_ignore_parallel.json" "$CMD"
+  IFS=',' read -r cpu_user cpu_sys <<< "$(capture_cpu_time "$CMD")"
+  write_row "ignore-parallel" "$w" "$SCRATCH/hf_ignore_parallel.json" "$cpu_user" "$cpu_sys"
+done
 
 echo "results written to $OUT"
-column -s, -t "$OUT"
+if command -v column >/dev/null 2>&1; then
+  column -s, -t "$OUT"
+else
+  echo "(install 'column' from bsdmainutils/util-linux for a pretty-printed summary table)" >&2
+  cat "$OUT"
+fi

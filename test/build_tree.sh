@@ -1,17 +1,12 @@
 #!/usr/bin/env bash
 # build_tree.sh — reproducible synthetic directory tree generator.
 #
-# Improvements over the original test/build_tree.sh:
-#   1. Fixed seed by default -> byte-identical tree across runs, across
-#      machines, across "walkman vs walkdir" invocations. This is what
-#      fixes the / non-determinism problem: benchmark THIS, not a live
-#      mutating filesystem.
-#   2. Shape control (--shape wide|deep|mixed) since a work-stealing pool
+#   1. Shape control (--shape wide|deep|mixed) since a work-stealing pool
 #      and a stack-based sequential walker have different asymptotic
 #      behavior on wide-shallow trees (lots of independent, stealable work)
 #      vs deep-narrow trees (long dependency chains, less to steal).
 #      Reporting only one shape hides that difference.
-#   3. Writes a manifest (exact file/dir/link counts) next to the tree so
+#   2. Writes a manifest (exact file/dir/link counts) next to the tree so
 #      every later benchmark run can assert its walker saw the same
 #      counts, instead of trusting that nothing drifted.
 #
