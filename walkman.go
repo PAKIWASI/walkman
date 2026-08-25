@@ -78,7 +78,7 @@ func DefaultPoolConfig() PoolConfig {
 type Walkman struct {
 	conf  walkConf
 	stats walkStats
-	pool  wsp.WorkerPool[walkItem, WalkResult]
+	pool  *wsp.WorkerPool[walkItem, WalkResult]
 }
 
 // readDir opens name and reads every entry in it, unsorted. Deliberately
@@ -119,7 +119,13 @@ func NewWalkman(followLinks bool, maxDepth uint32, skipList []string) *Walkman {
 // to track walkStats (costs an atomic.Add per entry when on), and pool
 // sizing, for callers who've measured what suits their workload rather
 // than accepting the defaults.
-func NewWalkmanWithConfig(followLinks bool, maxDepth uint32, skipList []string, trackStats bool, pc PoolConfig) *Walkman {
+func NewWalkmanWithConfig(
+	followLinks bool,
+	maxDepth uint32,
+	skipList []string,
+	trackStats bool,
+	pc PoolConfig,
+) *Walkman {
 
 	skipSet := make(map[string]struct{}, len(skipList))
 	for _, v := range skipList {
