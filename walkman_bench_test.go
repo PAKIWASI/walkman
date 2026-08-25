@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"unsafe"
 )
 
 // benchRoot returns the tree to walk in benchmarks. Defaults to "/" per
@@ -264,3 +265,148 @@ func BenchmarkWalk_Synthetic_PoolSize(b *testing.B) {
 		})
 	}
 }
+
+
+// TestWalkItemSize documents the actual, measured cost of adding the
+// ancestors field to walkItem for both modes, rather than an eyeballed
+// claim. It's a test (always run, always visible), not a benchmark, since
+// unsafe.Sizeof is a compile-time constant — there's nothing to time.
+func TestWalkItemSize(t *testing.T) {
+	t.Logf("unsafe.Sizeof(walkItem{}) = %d bytes", unsafe.Sizeof(walkItem{}))
+	t.Logf("unsafe.Sizeof(ancestorNode{}) = %d bytes (never allocated unless followLinks is on)", unsafe.Sizeof(ancestorNode{}))
+}
+
+// buildSymlinkTree builds buildSyntheticTree's shape, then adds one
+// symlink per directory pointing at a small target tree that lives
+// entirely outside the walked root — real cross-links, not
+// self-references, so followLinks=true does genuine extra directory
+// descents (not just extra stats) without ever creating an actual cycle,
+// the same way a well-formed real followLinks=true tree would.
+func buildSymlinkTree(b *testing.B, depth, breadth int) string {
+	b.Helper()
+	root := buildSyntheticTree(b, depth, breadth)
+
+	// A separate, unrelated tree the walked root has no other path to, so
+	// every symlink resolves to the same place without ever pointing back
+	// at anything already on the current descent path.
+	target := b.TempDir()
+	for f := 0; f < 2; f++ {
+		p := filepath.Join(target, fmt.Sprintf("leaf%d.txt", f))
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			b.Fatalf("WriteFile(%q): %v", p, err)
+		}
+	}
+
+	var addLinks func(dir string, level int)
+	addLinks = func(dir string, level int) {
+		link := filepath.Join(dir, "link_out")
+		if err := os.Symlink(target, link); err != nil {
+			b.Fatalf("Symlink(%q): %v", link, err)
+		}
+		if level >= depth {
+			return
+		}
+		for i := 0; i < breadth; i++ {
+			addLinks(filepath.Join(dir, fmt.Sprintf("d%d", i)), level+1)
+		}
+	}
+	addLinks(root, 0)
+
+	return root
+}
+
+// walkFollowLinks is walkParallel's followLinks=true counterpart.
+func walkFollowLinks(b *testing.B, root string, pc PoolConfig) (files, dirs int) {
+	b.Helper()
+	w := NewWalkmanWithConfig(true, 0, nil, false, pc)
+	for r := range w.Walk(root) {
+		if r.Err != nil {
+			continue
+		}
+		for _, e := range r.Ret {
+			if e.IsDir() {
+				dirs++
+			} else {
+				files++
+			}
+		}
+	}
+	if err := w.Wait(); err != nil {
+		b.Fatalf("Wait() = %v", err)
+	}
+	return files, dirs
+}
+
+// BenchmarkWalk_FollowLinks_NoSymlinksPresent isolates the cost of turning
+// followLinks on when the tree contains no symlinks at all — i.e. the cost
+// of running visitSym instead of visit per directory. The struct-field
+// cost (one extra pointer in walkItem) is effectively free either way; the
+// real cost, if any, is the extra os.Lstat per plain directory that
+// visitSym does to extend the ancestor chain for cycle detection. This is
+// the number that answers "what does opting in cost me even on a tree with
+// no symlinks to follow".
+func BenchmarkWalk_FollowLinks_NoSymlinksPresent(b *testing.B) {
+	const depth, breadth = 4, 6
+	root := buildSyntheticTree(b, depth, breadth)
+	pc := DefaultPoolConfig()
+
+	b.Run("followLinks=false", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			walkParallel(b, root, nil, pc)
+		}
+	})
+
+	b.Run("followLinks=true", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			walkFollowLinks(b, root, pc)
+		}
+	})
+}
+
+// BenchmarkWalk_FollowLinks_WithSymlinks is the realistic case: a tree
+// that actually has symlinks to follow. followLinks=false here undercounts
+// (it stops at each symlink, per its documented contract) so this isn't an
+// apples-to-apples throughput comparison — it's the number for "what does
+// a real followLinks=true walk, doing real extra descents and cycle
+// checks, cost in absolute terms".
+func BenchmarkWalk_FollowLinks_WithSymlinks(b *testing.B) {
+	const depth, breadth = 3, 4
+	root := buildSymlinkTree(b, depth, breadth)
+	pc := DefaultPoolConfig()
+
+	b.Run("followLinks=false", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			walkParallel(b, root, nil, pc)
+		}
+	})
+
+	b.Run("followLinks=true", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			walkFollowLinks(b, root, pc)
+		}
+	})
+}
+
+// BenchmarkWalk_FollowLinks_PoolSize is BenchmarkWalk_PoolSize's
+// followLinks=true counterpart: does stealing pay off the same way once
+// every directory visit also carries an Lstat and ancestor-chain bookkeeping?
+func BenchmarkWalk_FollowLinks_PoolSize(b *testing.B) {
+	const depth, breadth = 3, 4
+	root := buildSymlinkTree(b, depth, breadth)
+
+	for _, poolSize := range []int{1, 2, 4, 8, 16, 32} {
+		pc := PoolConfig{PoolSize: poolSize, InitialWorkerCap: 32, ResultBuffSize: 64}
+		b.Run(fmt.Sprintf("workers=%d", poolSize), func(b *testing.B) {
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				walkFollowLinks(b, root, pc)
+			}
+		})
+	}
+}
+
+

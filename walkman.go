@@ -3,11 +3,13 @@ package walkman
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sync/atomic"
+	"syscall"
 
 	wsp "github.com/PAKIWASI/workstealpool"
 )
@@ -23,12 +25,18 @@ import (
 //    here, Walk could return an iterator instead of a channel. Same
 //    ordering caveat as above applies.
 // 3. pipelines?
+//
+// symlink cycle detection: one walkItem type is used for both modes.
+// ancestors stays nil (zero cost, never touched) unless followLinks is on.
+// Which Task the pool runs — visit or visitSym — is chosen once at
+// construction, not branched per-entry, so the non-symlink path pays
+// nothing beyond the one extra pointer field in walkItem.
 
 type walkConf struct {
-	followLinks bool
+	followLinks bool   // off by default
+	trackStats  bool   // off by default: every stat is an atomic.Add
 	maxDepth    uint32 // 0 means unlimited
 	skipSet     map[string]struct{}
-	trackStats  bool // off by default: every stat is an atomic.Add
 }
 
 // walkStats is written concurrently from every worker's Task invocation when trackStats is enabled
@@ -46,10 +54,53 @@ type WalkResult struct {
 	Err error
 }
 
-// walkItem is the actual work-stealing pool item
+// walkItem is the actual work-stealing pool item. ancestors is only ever
+// non-nil when followLinks is on (visitSym populates it; visit ignores it
+// and always spawns with it left at its zero value), so plain walks pay
+// only for the width of one extra pointer field, never for what it points to.
 type walkItem struct {
-	path  string
-	depth uint32
+	depth     uint32
+	path      string
+	ancestors *ancestorNode
+}
+
+// dirKey identifies a directory by device+inode, stable across the
+// different paths that can reach the same directory (e.g. through a symlink).
+type dirKey struct {
+	dev, ino uint64
+}
+
+// ancestorNode is a chain of every directory above the current walkItem in
+// the walk's current path, root-to-here. Only built/consulted when
+// followLinks is on; nil (and untouched) otherwise.
+type ancestorNode struct {
+	key    dirKey
+	parent *ancestorNode
+}
+
+func (a *ancestorNode) contains(k dirKey) bool {
+	for n := a; n != nil; n = n.parent {
+		if n.key == k {
+			return true
+		}
+	}
+	return false
+}
+
+// statKey Lstat's path and returns its dirKey. Only called when followLinks
+// is on: once per plain directory (to extend the ancestor chain in case a
+// symlink further down points back to it) and once per resolved symlink
+// target (to check it against that chain).
+func statKey(path string) (dirKey, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return dirKey{}, err
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return dirKey{}, fmt.Errorf("walkman: no dev/ino info for %s", path)
+	}
+	return dirKey{dev: uint64(st.Dev), ino: st.Ino}, nil
 }
 
 // PoolConfig exposes the underlying worker-pool knobs
@@ -112,8 +163,21 @@ func NewWalkmanWithConfig(
 		},
 	}
 
-	w.pool = wsp.NewWorkerPool(context.Background(), pc.PoolSize, pc.InitialWorkerCap, pc.ResultBuffSize,
-		w.visit)
+	// The pool is bound to one Task at construction. Which one we hand it
+	// is the only thing that differs between plain and symlink-following
+	// walks — same item type, same pool, no per-entry branch.
+	execute := w.visit
+	if followLinks {
+		execute = w.visitSym
+	}
+
+	w.pool = wsp.NewWorkerPool(
+		context.Background(),
+		pc.PoolSize,
+		pc.InitialWorkerCap,
+		pc.ResultBuffSize,
+		execute,
+	)
 
 	return w
 }
@@ -165,7 +229,11 @@ func filterSkipped(dirs []fs.DirEntry, skip map[string]struct{}) []fs.DirEntry {
 // called concurrently, from any worker in the pool for different items—
 // so it must not touch anything on Walkman that isn't safe for that
 // (conf is read-only after construction; stats is all atomics).
-func (w *Walkman) visit(_ context.Context, item walkItem, spawn func(walkItem)) (*WalkResult, error) {
+func (w *Walkman) visit(
+	_ context.Context,
+	item walkItem,
+	spawn func(walkItem),
+) (*WalkResult, error) {
 	dirs, err := readDir(item.path)
 	if err != nil {
 		// A permission-denied (or similar) directory is a fact about that
@@ -192,30 +260,11 @@ func (w *Walkman) visit(_ context.Context, item walkItem, spawn func(walkItem)) 
 		isDir := mode.IsDir()
 		isSymlink := mode&fs.ModeSymlink != 0
 
+		// this Task never follows symlinks: visitSym is used instead when
+		// followLinks is on (see NewWalkmanWithConfig)
 		if isSymlink {
 			linksCount++
-			if !w.conf.followLinks {
-				continue
-			}
-
-			// os.Stat (unlike Lstat) follows the link. This is the one
-			// deliberate extra syscall in the walk, and it's only paid
-			// for an actual symlink entry, only when followLinks is on.
-			//
-			// TODO: KNOWN LIMITATION: following links can cycle (a symlink
-			// pointing back at an ancestor directory), which would recurse
-			// forever. There's no cycle detection here (would need a
-			// shared, lock-protected set of visited inodes/device+ino
-			// pairs across all workers) — treat followLinks as unsafe on
-			// trees you don't trust until that's added.
-			target := join(item.path, entry.Name())
-			info, statErr := os.Stat(target)
-			if statErr != nil {
-				// Broken symlink or permission issue resolving it - leave
-				// it as a link entry in Ret, don't recurse into it.
-				continue
-			}
-			isDir = info.IsDir()
+			continue
 		}
 
 		if !isDir {
@@ -259,6 +308,136 @@ func (w *Walkman) visit(_ context.Context, item walkItem, spawn func(walkItem)) 
 	return &WalkResult{Dir: item.path, Ret: dirs, Err: nil}, nil
 }
 
+// visitSym is visit's counterpart for followLinks: same item type, same
+// pool, only used when the Walkman was built with followLinks on (see
+// NewWalkmanWithConfig). It additionally resolves symlinked directories and
+// walks into them, guarding against cycles via item.ancestors — the chain
+// of dirKeys (dev+ino) for every directory from root down to here,
+// regardless of whether each hop was a plain directory or a followed
+// symlink. That "regardless" matters: a symlink can point back to an
+// ancestor that was reached by ordinary descent, not just one reached
+// through another symlink, so the chain has to cover both or cycles through
+// a plain ancestor go undetected.
+func (w *Walkman) visitSym(
+	_ context.Context,
+	item walkItem,
+	spawn func(walkItem),
+) (*WalkResult, error) {
+	dirs, err := readDir(item.path)
+	if err != nil {
+		return &WalkResult{Dir: item.path, Err: err}, nil
+	}
+
+	before := len(dirs)
+
+	if len(w.conf.skipSet) != 0 && before != 0 {
+		dirs = filterSkipped(dirs, w.conf.skipSet)
+	}
+	skippedCount := uint32(before - len(dirs))
+
+	// Local, non-atomic counters accumulated across every entry in this
+	// directory; the atomics (one per counter, not per entry) only get
+	// touched once, after the loop, and only if trackStats is on at all.
+	var filesCount, dirsCount, linksCount, maxDepthCount uint32
+
+	for i := range dirs {
+		entry := dirs[i]
+
+		childPath := join(item.path, entry.Name())
+		childAncestors := item.ancestors
+
+		mode := entry.Type()
+		isDir := mode.IsDir()
+		isSymlink := mode&fs.ModeSymlink != 0
+
+		if isSymlink {
+			linksCount++
+
+			resolvedSym, err := filepath.EvalSymlinks(childPath)
+			if err != nil {
+				// Dangling/unresolvable symlink is a fact about that one
+				// entry, not a reason to fail the whole walk.
+				continue
+			}
+
+			info, err := os.Lstat(resolvedSym)
+			if err != nil || !info.IsDir() {
+				continue
+			}
+			st, ok := info.Sys().(*syscall.Stat_t)
+			if !ok {
+				continue
+			}
+			k := dirKey{dev: uint64(st.Dev), ino: st.Ino}
+
+			if item.ancestors.contains(k) {
+				return nil, fmt.Errorf("walkman: symlink cycle: %s -> %s", childPath, resolvedSym)
+			}
+
+			// A symlink-to-directory entry never has fs.ModeDir set on its
+			// own DirEntry (that's precisely what distinguishes it from a
+			// plain directory at readdir time) — force isDir now that
+			// we've resolved it, so it's treated as a directory below
+			// instead of falling through to the file-count branch.
+			isDir = true
+			childPath = resolvedSym
+			childAncestors = &ancestorNode{key: k, parent: item.ancestors}
+		}
+
+		if !isDir {
+			filesCount++
+			continue
+		}
+
+		dirsCount++
+
+		if w.conf.maxDepth != 0 && item.depth+1 > w.conf.maxDepth {
+			maxDepthCount++
+			continue
+		}
+
+		if !isSymlink {
+			// Extend the chain with this plain directory's own key too, so
+			// a symlink further down that points back to it is still
+			// caught (see the doc comment above).
+			if k, err := statKey(childPath); err == nil {
+				childAncestors = &ancestorNode{key: k, parent: item.ancestors}
+			}
+			// If statKey fails here (e.g. raced away), we simply don't
+			// extend the chain for this branch — same permissive handling
+			// as a dangling symlink above, not a walk-ending error.
+		}
+
+		spawn(walkItem{
+			path:      childPath,
+			depth:     item.depth + 1,
+			ancestors: childAncestors,
+		})
+	}
+
+	if w.conf.trackStats {
+		// Zero-valued counters still cost an atomic fence for nothing, so
+		// only touch the ones that actually moved this directory.
+		if skippedCount != 0 {
+			w.stats.skipped.Add(skippedCount)
+		}
+		if filesCount != 0 {
+			w.stats.files.Add(filesCount)
+		}
+		if dirsCount != 0 {
+			w.stats.dirs.Add(dirsCount)
+		}
+		if linksCount != 0 {
+			w.stats.links.Add(linksCount)
+		}
+		if maxDepthCount != 0 {
+			w.stats.maxDepthReached.Add(maxDepthCount)
+		}
+	}
+
+	return &WalkResult{Dir: item.path, Ret: dirs, Err: nil}, nil
+}
+
 // Walk starts walking root and returns a channel of per-directory results.
 // The channel closes once every worker has finished (no work left, or a
 // fatal error occurred). Call Wait after draining the channel to get the
@@ -268,7 +447,19 @@ func (w *Walkman) Walk(root string) <-chan WalkResult {
 	// join, not filepath.Join) can assume its parent is already clean
 	// without re-running filepath.Clean per entry.
 	root = filepath.Clean(root)
-	w.pool.Submit(walkItem{path: root, depth: 0})
+
+	item := walkItem{path: root, depth: 0}
+
+	// Seed the ancestor chain with the root's own key so a symlink
+	// anywhere in the tree that points straight back to root is still
+	// caught, not just symlinks pointing at some deeper ancestor.
+	if w.conf.followLinks {
+		if k, err := statKey(root); err == nil {
+			item.ancestors = &ancestorNode{key: k}
+		}
+	}
+
+	w.pool.Submit(item)
 	return w.pool.Run()
 }
 
