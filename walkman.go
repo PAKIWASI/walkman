@@ -165,7 +165,7 @@ func filterSkipped(dirs []fs.DirEntry, skip map[string]struct{}) []fs.DirEntry {
 // called concurrently, from any worker in the pool for different items—
 // so it must not touch anything on Walkman that isn't safe for that
 // (conf is read-only after construction; stats is all atomics).
-func (w *Walkman) visit(ctx context.Context, item walkItem, spawn func(walkItem)) (*WalkResult, error) {
+func (w *Walkman) visit(_ context.Context, item walkItem, spawn func(walkItem)) (*WalkResult, error) {
 	dirs, err := readDir(item.path)
 	if err != nil {
 		// A permission-denied (or similar) directory is a fact about that
