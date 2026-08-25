@@ -25,8 +25,7 @@
 # *why* one tool is faster/slower, not just that it is.
 #
 # Usage:
-#   python3 build_tree.py --shape wide --root /tmp/tree_wide --seed 42
-#   # (or: ./build_tree.sh --shape wide --root /tmp/tree_wide --seed 42)
+#   ./build_tree.sh --shape wide --root /tmp/tree_wide --seed 42
 #
 #   ./perf_bench.sh \
 #       --walkman          ../build/main \
@@ -36,9 +35,6 @@
 #       --workers          "1,2,4,$(nproc)" \
 #       --runs             15 \
 #       --out              perf_results.csv
-#
-# Then summarize any perf_results.csv (from this run or a past one) with:
-#   ./perf_summary.py perf_results.csv
 
 set -euo pipefail
 
