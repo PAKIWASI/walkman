@@ -25,12 +25,11 @@ import (
 //    ordering caveat as above applies.
 // 3. pipelines?
 
-
 type walkConf struct {
 	followLinks bool
 	maxDepth    uint32 // 0 means unlimited
-	skipList    []string
-	trackStats  bool   // off by default: every stat is an atomic.Add
+	skipSet     map[string]struct{}
+	trackStats  bool // off by default: every stat is an atomic.Add
 }
 
 // walkStats is written concurrently from every worker's Task invocation when trackStats is enabled
@@ -121,11 +120,17 @@ func NewWalkman(followLinks bool, maxDepth uint32, skipList []string) *Walkman {
 // sizing, for callers who've measured what suits their workload rather
 // than accepting the defaults.
 func NewWalkmanWithConfig(followLinks bool, maxDepth uint32, skipList []string, trackStats bool, pc PoolConfig) *Walkman {
+
+	skipSet := make(map[string]struct{}, len(skipList))
+	for _, v := range skipList {
+		skipSet[v] = struct{}{}
+	}
+
 	w := &Walkman{
 		conf: walkConf{
 			followLinks: followLinks,
 			maxDepth:    maxDepth,
-			skipList:    skipList,
+			skipSet:     skipSet,
 			trackStats:  trackStats,
 		},
 	}
@@ -149,8 +154,10 @@ func (w *Walkman) visit(ctx context.Context, item walkItem, spawn func(walkItem)
 	}
 
 	before := len(dirs)
+	// TODO: do a swapdelete here, this seems inefficient
 	dirs = slices.DeleteFunc(dirs, func(d fs.DirEntry) bool {
-		return slices.Contains(w.conf.skipList, d.Name())
+		_, skip := w.conf.skipSet[d.Name()]
+		return skip
 	})
 	if w.conf.trackStats {
 		w.stats.skipped.Add(uint32(before - len(dirs)))
@@ -248,5 +255,3 @@ func (w *Walkman) Stats() (files, dirs, links, skipped, maxDepthReached uint32) 
 		w.stats.skipped.Load(),
 		w.stats.maxDepthReached.Load()
 }
-
-
