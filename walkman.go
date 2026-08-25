@@ -146,6 +146,21 @@ func join(dir, name string) string {
 	return dir + string(os.PathSeparator) + name
 }
 
+// filterSkipped removes, in place and without preserving order, every
+// entry whose Name() is in skip. It's a swap-delete
+func filterSkipped(dirs []fs.DirEntry, skip map[string]struct{}) []fs.DirEntry {
+	n := len(dirs)
+	for i := 0; i < n; {
+		if _, present := skip[dirs[i].Name()]; present {
+			n--
+			dirs[i] = dirs[n]
+			continue // re-check index i against the newly swapped-in entry
+		}
+		i++
+	}
+	return dirs[:n]
+}
+
 // visit is the Task run for every directory the walk encounters. It is
 // called concurrently, from any worker in the pool for different items—
 // so it must not touch anything on Walkman that isn't safe for that
@@ -158,27 +173,17 @@ func (w *Walkman) visit(ctx context.Context, item walkItem, spawn func(walkItem)
 		return &WalkResult{Dir: item.path, Err: err}, nil
 	}
 
-	// TODO: test for correctness on this section
-
 	before := len(dirs)
-	deleted := 0
 
-	// swap delete
-	for i := range dirs {
-		_, present := w.conf.skipSet[dirs[i].Name()]
-		if present {
-			dirs[i] = dirs[len(dirs)-1] // move last element into deleted spot (order is unimportant)
-			deleted++
-		}
+	if len(w.conf.skipSet) != 0 && before != 0 {
+		dirs = filterSkipped(dirs, w.conf.skipSet)
 	}
+	skippedCount := uint32(before - len(dirs))
 
-	// get another view into the same array (no new allocation) but with less length (we deleted some elms)
-	dirs = dirs[:before - deleted]
-
-
-	if w.conf.trackStats {
-		w.stats.skipped.Add(uint32(before - len(dirs)))
-	}
+	// Local, non-atomic counters accumulated across every entry in this
+	// directory; the atomics (one per counter, not per entry) only get
+	// touched once, after the loop, and only if trackStats is on at all.
+	var filesCount, dirsCount, linksCount, maxDepthCount uint32
 
 	for i := range dirs {
 		entry := dirs[i]
@@ -188,9 +193,7 @@ func (w *Walkman) visit(ctx context.Context, item walkItem, spawn func(walkItem)
 		isSymlink := mode&fs.ModeSymlink != 0
 
 		if isSymlink {
-			if w.conf.trackStats {
-				w.stats.links.Add(1)
-			}
+			linksCount++
 			if !w.conf.followLinks {
 				continue
 			}
@@ -216,21 +219,14 @@ func (w *Walkman) visit(ctx context.Context, item walkItem, spawn func(walkItem)
 		}
 
 		if !isDir {
-			if w.conf.trackStats {
-				w.stats.files.Add(1)
-			}
+			filesCount++
 			continue
 		}
 
-		// TODO: we should note stats and only do one if w.conf.trackStats call and set it all
-		if w.conf.trackStats {
-			w.stats.dirs.Add(1)
-		}
+		dirsCount++
 
 		if w.conf.maxDepth != 0 && item.depth+1 > w.conf.maxDepth {
-			if w.conf.trackStats {
-				w.stats.maxDepthReached.Add(1)
-			}
+			maxDepthCount++
 			continue
 		}
 
@@ -238,6 +234,26 @@ func (w *Walkman) visit(ctx context.Context, item walkItem, spawn func(walkItem)
 			path:  join(item.path, entry.Name()),
 			depth: item.depth + 1,
 		})
+	}
+
+	if w.conf.trackStats {
+		// Zero-valued counters still cost an atomic fence for nothing, so
+		// only touch the ones that actually moved this directory.
+		if skippedCount != 0 {
+			w.stats.skipped.Add(skippedCount)
+		}
+		if filesCount != 0 {
+			w.stats.files.Add(filesCount)
+		}
+		if dirsCount != 0 {
+			w.stats.dirs.Add(dirsCount)
+		}
+		if linksCount != 0 {
+			w.stats.links.Add(linksCount)
+		}
+		if maxDepthCount != 0 {
+			w.stats.maxDepthReached.Add(maxDepthCount)
+		}
 	}
 
 	return &WalkResult{Dir: item.path, Ret: dirs, Err: nil}, nil
