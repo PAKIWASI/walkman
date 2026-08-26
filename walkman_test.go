@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -137,12 +138,7 @@ func sequentialCounts(t *testing.T, root string, skip []string) (files, dirs int
 }
 
 func contains(ss []string, s string) bool {
-	for _, x := range ss {
-		if x == s {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(ss, s)
 }
 
 // ---------------------------------------------------------------------
@@ -744,8 +740,8 @@ func TestWalk_ConsistentAcrossPoolSizes(t *testing.T) {
 	// A reasonably wide+deep synthetic tree so there's real stealing
 	// pressure, not just a couple of directories.
 	var spec []string
-	for i := 0; i < 6; i++ {
-		for j := 0; j < 6; j++ {
+	for i := range 6 {
+		for j := range 6 {
 			spec = append(spec, filepath.Join(
 				"d"+itoa(i), "d"+itoa(j), "leaf"+itoa(j)+".txt",
 			))
@@ -764,7 +760,6 @@ func TestWalk_ConsistentAcrossPoolSizes(t *testing.T) {
 	}
 
 	for _, pc := range configs {
-		pc := pc
 		t.Run("", func(t *testing.T) {
 			w := NewWalkmanWithConfig(false, 0, nil, false, pc)
 			results, err := drain(t, w, root)
@@ -798,8 +793,8 @@ func TestWalk_RepeatedRuns_NoFlakiness(t *testing.T) {
 	}
 
 	var spec []string
-	for i := 0; i < 4; i++ {
-		for j := 0; j < 4; j++ {
+	for i := range 4 {
+		for j := range 4 {
 			spec = append(spec, filepath.Join("d"+itoa(i), "leaf"+itoa(j)+".txt"))
 		}
 	}
@@ -807,7 +802,7 @@ func TestWalk_RepeatedRuns_NoFlakiness(t *testing.T) {
 	wantFiles, wantDirs := sequentialCounts(t, root, nil)
 
 	const trials = 30
-	for trial := 0; trial < trials; trial++ {
+	for trial := range trials {
 		pc := PoolConfig{PoolSize: 6, InitialWorkerCap: 4, ResultBuffSize: 4}
 		w := NewWalkmanWithConfig(false, 0, nil, false, pc)
 
@@ -832,7 +827,7 @@ func TestWalk_OversubscribedParksAndWakesCleanly(t *testing.T) {
 
 	pc := PoolConfig{PoolSize: 64, InitialWorkerCap: 4, ResultBuffSize: 4}
 
-	for trial := 0; trial < 20; trial++ {
+	for trial := range 20 {
 		w := NewWalkmanWithConfig(false, 0, nil, false, pc)
 		if _, err := drain(t, w, root); err != nil {
 			t.Fatalf("trial %d: Wait() = %v, want nil", trial, err)
@@ -867,7 +862,6 @@ func itoa(n int) string {
 	}
 	return string(digits)
 }
-
 
 // wantCycleErr fails the test unless err is non-nil and mentions "cycle".
 func wantCycleErr(t *testing.T, err error) {
@@ -1066,7 +1060,6 @@ func TestWalk_SymlinkCycle_ErrorIsFirstAndOnly(t *testing.T) {
 	wantCycleErr(t, err)
 }
 
-
 // ---------------------------------------------------------------------
 // fakeDirEntry: a minimal fs.DirEntry with a controllable Name(), so
 // filterSkipped can be tested against exact, deterministic orderings.
@@ -1223,8 +1216,8 @@ func TestFilterSkipped_ConsecutiveMatchesAtTail(t *testing.T) {
 // (not just head+tail) gets exercised, not just the one pattern above.
 func TestFilterSkipped_EveryAdjacentPairAtTail(t *testing.T) {
 	base := []string{"n0", "n1", "n2", "n3", "n4"}
-	for skipI := 0; skipI < len(base); skipI++ {
-		for skipJ := 0; skipJ < len(base); skipJ++ {
+	for skipI := range base {
+		for skipJ := range base {
 			if skipI == skipJ {
 				continue
 			}
@@ -1318,7 +1311,7 @@ func TestWalk_SkipList_LargeMixedFanout(t *testing.T) {
 	const total = 400
 	skipNames := make(map[string]struct{})
 	var spec []string
-	for i := 0; i < total; i++ {
+	for i := range total {
 		n := "entry" + itoa(i)
 		if i%3 == 0 { // every third one is a directory eligible for skipping
 			spec = append(spec, n+"/")
@@ -1378,7 +1371,7 @@ func TestWalk_SkipList_StatsAgreeWithPlainCount(t *testing.T) {
 	const total = 200
 	var spec []string
 	var skipList []string
-	for i := 0; i < total; i++ {
+	for i := range total {
 		n := "d" + itoa(i)
 		spec = append(spec, n+"/", filepath.Join(n, "f.txt"))
 		if i%2 == 0 {

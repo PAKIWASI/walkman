@@ -199,7 +199,7 @@ func buildSyntheticTree(b *testing.B, depth, breadth int) string {
 	build = func(dir string, level int) {
 		// A couple of files at every level so leaves aren't the only
 		// thing being counted.
-		for f := 0; f < 2; f++ {
+		for f := range 2 {
 			p := filepath.Join(dir, fmt.Sprintf("file%d.txt", f))
 			if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
 				b.Fatalf("WriteFile(%q): %v", p, err)
@@ -208,7 +208,7 @@ func buildSyntheticTree(b *testing.B, depth, breadth int) string {
 		if level >= depth {
 			return
 		}
-		for i := 0; i < breadth; i++ {
+		for i := range breadth {
 			sub := filepath.Join(dir, fmt.Sprintf("d%d", i))
 			if err := os.Mkdir(sub, 0o755); err != nil {
 				b.Fatalf("Mkdir(%q): %v", sub, err)
@@ -266,7 +266,6 @@ func BenchmarkWalk_Synthetic_PoolSize(b *testing.B) {
 	}
 }
 
-
 // TestWalkItemSize documents the actual, measured cost of adding the
 // ancestors field to walkItem for both modes, rather than an eyeballed
 // claim. It's a test (always run, always visible), not a benchmark, since
@@ -290,7 +289,7 @@ func buildSymlinkTree(b *testing.B, depth, breadth int) string {
 	// every symlink resolves to the same place without ever pointing back
 	// at anything already on the current descent path.
 	target := b.TempDir()
-	for f := 0; f < 2; f++ {
+	for f := range 2 {
 		p := filepath.Join(target, fmt.Sprintf("leaf%d.txt", f))
 		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
 			b.Fatalf("WriteFile(%q): %v", p, err)
@@ -306,7 +305,7 @@ func buildSymlinkTree(b *testing.B, depth, breadth int) string {
 		if level >= depth {
 			return
 		}
-		for i := 0; i < breadth; i++ {
+		for i := range breadth {
 			addLinks(filepath.Join(dir, fmt.Sprintf("d%d", i)), level+1)
 		}
 	}
@@ -408,5 +407,3 @@ func BenchmarkWalk_FollowLinks_PoolSize(b *testing.B) {
 		})
 	}
 }
-
-
