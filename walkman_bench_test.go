@@ -63,10 +63,10 @@ func walkParallel(b *testing.B, root string, skip []string, pc PoolConfig) (file
 	b.Helper()
 	w := NewWalkmanWithConfig(false, 0, skip, false, pc)
 	for r := range w.Walk(root) {
-		if r.Err != nil {
-			continue // same policy as the sequential baseline above
+		if r.Entries == nil {
+			continue // directory itself unreadable, same policy as the sequential baseline above
 		}
-		for _, e := range r.Ret {
+		for _, e := range r.Entries {
 			if e.IsDir() {
 				dirs++
 			} else {
@@ -319,10 +319,10 @@ func walkFollowLinks(b *testing.B, root string, pc PoolConfig) (files, dirs int)
 	b.Helper()
 	w := NewWalkmanWithConfig(true, 0, nil, false, pc)
 	for r := range w.Walk(root) {
-		if r.Err != nil {
-			continue
+		if r.Entries == nil {
+			continue // directory itself unreadable
 		}
-		for _, e := range r.Ret {
+		for _, e := range r.Entries {
 			if e.IsDir() {
 				dirs++
 			} else {

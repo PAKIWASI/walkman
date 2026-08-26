@@ -14,8 +14,6 @@
 //	--bench N         repeat N times, report timing stats
 //	--quiet           suppress summary line
 //	--workers N       pool size (0 = GOMAXPROCS default, matches defaultPoolConfig)
-
-// TODO: symlink cycle detection is not present right now, do that to test that with walkdir aswell
 package main
 
 import (
@@ -59,21 +57,22 @@ func main() {
 		pc.PoolSize = runtime.GOMAXPROCS(0)
 	}
 
-	runOnce := func() (files, dirs, links, errs uint64, elapsed time.Duration) {
+	runOnce := func() (files, dirs, links, errs uint32, elapsed time.Duration) {
 		w := walkman.NewWalkmanWithConfig(*followLinks, uint32(*maxDepth), skip, true, pc)
 		start := time.Now()
 		for r := range w.Walk(root) {
-			if r.Err != nil {
-				errs++
+			if n := len(r.Errs); n != 0 {
+				errs += uint32(n)
 				if *print {
-					fmt.Fprintf(os.Stderr, "error: %s %v\n", r.Dir, r.Err)
+					for _, ie := range r.Errs {
+						fmt.Fprintf(os.Stderr, "error: %s %v\n", ie.Name, ie.Err)
+					}
 				}
+			}
+			if !*print || r.Entries == nil {
 				continue
 			}
-			if !*print {
-				continue
-			}
-			for _, e := range r.Ret {
+			for _, e := range r.Entries {
 				t := e.Type()
 				kind := "f"
 				switch {
@@ -100,14 +99,14 @@ func main() {
 			os.Exit(1)
 		}
 		f, d, l, _, _ := w.Stats()
-		files, dirs, links = uint64(f), uint64(d), uint64(l)
+		files, dirs, links = f, d, l
 		return
 	}
 
 	if *bench > 0 {
 		n := int(*bench)
 		durations := make([]time.Duration, 0, n)
-		var lastFiles, lastDirs, lastLinks, lastErrs uint64
+		var lastFiles, lastDirs, lastLinks, lastErrs uint32
 		var total time.Duration
 		min := time.Duration(1<<63 - 1)
 		var max time.Duration

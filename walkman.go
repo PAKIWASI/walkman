@@ -3,7 +3,7 @@ package walkman
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -12,6 +12,12 @@ import (
 	"syscall"
 
 	wsp "github.com/PAKIWASI/workstealpool"
+)
+
+// Sentinel errors reported via WalkResult.Err
+var (
+	errSymlinkCycle = errors.New("walkman: symlink cycle")
+	errNoDevInoInfo = errors.New("walkman: no dev/ino info available")
 )
 
 type walkConf struct {
@@ -30,10 +36,26 @@ type walkStats struct {
 	maxDepthReached atomic.Uint32
 }
 
+// DirErr is one error encountered while producing a WalkResult.
+// Name identifies which file/dir caused the err while
+// WalkResult.Dir is the directory being listed
+type DirErr struct {
+	Name string
+	Err  error
+}
+
+// WalkResult is one directory's outcome.
+//
+// Ret and Err are not mutually exclusive: a directory can list
+// successfully (Ret populated) while individual entries inside it still
+// had problems (e.g. one dangling symlink, one detected cycle), each
+// recorded as its own ItemErr in Err alongside the otherwise-complete Ret.
+// Ret is nil only when the directory itself couldn't be read at all, in
+// which case Err holds exactly that one failure.
 type WalkResult struct {
 	Dir string
-	Ret []fs.DirEntry
-	Err error
+	Entries []fs.DirEntry
+	Errs []DirErr
 }
 
 // walkItem is the actual work-stealing pool item. ancestors is only ever
@@ -80,7 +102,7 @@ func statKey(path string) (dirKey, error) {
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
-		return dirKey{}, fmt.Errorf("walkman: no dev/ino info for %s", path)
+		return dirKey{}, errNoDevInoInfo
 	}
 	return dirKey{dev: uint64(st.Dev), ino: st.Ino}, nil
 }
@@ -179,9 +201,7 @@ func readDir(name string) ([]fs.DirEntry, error) {
 }
 
 // join builds a child path from an already-clean parent and a bare entry
-// name (never containing a separator). Deliberately not filepath.Join:
-// that's variadic (a slice alloc) and re-runs filepath.Clean on the
-// result, which is wasted work once the parent is already clean
+// name (never containing a separator). Deliberately not filepath.Join (variadic)
 func join(dir, name string) string {
 	if dir == "" {
 		return name
@@ -220,7 +240,9 @@ func (w *Walkman) visit(
 	if err != nil {
 		// A permission-denied (or similar) directory is a fact about that
 		// one item, not a reason to kill every other worker in the pool.
-		return &WalkResult{Dir: item.path, Err: err}, nil
+		// Ret stays nil: the directory itself couldn't be read at all, so
+		// there's nothing else this result can carry.
+		return &WalkResult{Dir: item.path, Errs: []DirErr{{Name: item.path, Err: err}}}, nil
 	}
 
 	before := len(dirs)
@@ -286,7 +308,7 @@ func (w *Walkman) visit(
 		}
 	}
 
-	return &WalkResult{Dir: item.path, Ret: dirs, Err: nil}, nil
+	return &WalkResult{Dir: item.path, Entries: dirs}, nil
 }
 
 // visitSym is visit's counterpart for followLinks: same item type, same
@@ -302,7 +324,7 @@ func (w *Walkman) visitSym(
 ) (*WalkResult, error) {
 	dirs, err := readDir(item.path)
 	if err != nil {
-		return &WalkResult{Dir: item.path, Err: err}, nil
+		return &WalkResult{Dir: item.path, Errs: []DirErr{{Name: item.path, Err: err}}}, nil
 	}
 
 	before := len(dirs)
@@ -316,6 +338,9 @@ func (w *Walkman) visitSym(
 	// directory; the atomics (one per counter, not per entry) only get
 	// touched once, after the loop, and only if trackStats is on at all.
 	var filesCount, dirsCount, maxDepthCount uint32
+
+	// Err field is nil until the first problem, which is the common case
+	result := WalkResult{Dir: item.path, Entries: dirs}
 
 	for i := range dirs {
 		entry := dirs[i]
@@ -333,7 +358,9 @@ func (w *Walkman) visitSym(
 			resolvedSym, err := filepath.EvalSymlinks(childPath)
 			if err != nil {
 				// Dangling/unresolvable symlink is a fact about that one
-				// entry, not a reason to fail the whole walk.
+				// entry, not a reason to fail the whole walk and not an
+				// error at all, just a common, expected condition. Same
+				// silent, permissive handling as before.
 				continue
 			}
 
@@ -353,12 +380,11 @@ func (w *Walkman) visitSym(
 			}
 			k := dirKey{dev: uint64(st.Dev), ino: st.Ino}
 
-			// cycle detected: this is a per entry error
+			// Cycle detected: record it against this one entry and skip
+			// descending into it, but keep processing the rest of dirs.
 			if item.ancestors.contains(k) {
-				return &WalkResult{
-					Dir: item.path,
-					Err: fmt.Errorf("walkman: symlink cycle: %s -> %s", item.path, childPath),
-				}, nil
+				result.Errs = append(result.Errs, DirErr{Name: entry.Name(), Err: errSymlinkCycle})
+				continue
 			}
 
 			// A symlink-to-directory entry never has fs.ModeDir set on its
@@ -420,7 +446,7 @@ func (w *Walkman) visitSym(
 		}
 	}
 
-	return &WalkResult{Dir: item.path, Ret: dirs, Err: nil}, nil
+	return &result, nil
 }
 
 // Walk starts walking root and returns a channel of per-directory results.

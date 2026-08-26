@@ -75,17 +75,16 @@ func drain(t *testing.T, w *Walkman, root string) ([]WalkResult, error) {
 	return results, w.Wait()
 }
 
-// countEntries sums direct file/dir entries across every successful
-// WalkResult, the same convention BenchmarkWalk_* uses: a directory's
-// entries are counted once, from its own listing, not re-derived from
-// recursing into it again.
+// countEntries sums direct file/dir entries across every WalkResult's Ret
+// (present whenever the directory itself was readable, regardless of any
+// per-entry errors alongside it) and every ItemErr across every result,
+// the same convention BenchmarkWalk_* uses: a directory's entries are
+// counted once, from its own listing, not re-derived from recursing into
+// it again.
 func countEntries(results []WalkResult) (files, dirs int, errs int) {
 	for _, r := range results {
-		if r.Err != nil {
-			errs++
-			continue
-		}
-		for _, e := range r.Ret {
+		errs += len(r.Errs)
+		for _, e := range r.Entries {
 			if e.IsDir() {
 				dirs++
 			} else {
@@ -160,11 +159,11 @@ func TestWalk_EmptyDirectory(t *testing.T) {
 	if results[0].Dir != root {
 		t.Fatalf("results[0].Dir = %q, want %q", results[0].Dir, root)
 	}
-	if results[0].Err != nil {
-		t.Fatalf("results[0].Err = %v, want nil", results[0].Err)
+	if len(results[0].Errs) != 0 {
+		t.Fatalf("results[0].Err = %v, want empty", results[0].Errs)
 	}
-	if len(results[0].Ret) != 0 {
-		t.Fatalf("results[0].Ret = %v, want empty", results[0].Ret)
+	if len(results[0].Entries) != 0 {
+		t.Fatalf("results[0].Ret = %v, want empty", results[0].Entries)
 	}
 }
 
@@ -275,7 +274,7 @@ func TestWalk_SkipList_PrunesSubtree(t *testing.T) {
 		if r.Dir != root {
 			continue
 		}
-		for _, e := range r.Ret {
+		for _, e := range r.Entries {
 			if e.Name() == "skipme" {
 				t.Fatalf("skipped dir %q still present in root's Ret", e.Name())
 			}
@@ -343,13 +342,13 @@ func TestWalk_MaxDepth_StopsDescending(t *testing.T) {
 			continue
 		}
 		found := false
-		for _, e := range r.Ret {
+		for _, e := range r.Entries {
 			if e.Name() == "d2" && e.IsDir() {
 				found = true
 			}
 		}
 		if !found {
-			t.Fatalf("d1's Ret = %v, want it to contain entry d2", r.Ret)
+			t.Fatalf("d1's Ret = %v, want it to contain entry d2", r.Entries)
 		}
 	}
 }
@@ -493,12 +492,12 @@ func TestWalk_BrokenSymlink_DoesNotCrash(t *testing.T) {
 	if len(results) != 1 {
 		t.Fatalf("got %d results, want 1 (just root)", len(results))
 	}
-	if results[0].Err != nil {
-		t.Fatalf("root result Err = %v, want nil", results[0].Err)
+	if len(results[0].Errs) != 0 {
+		t.Fatalf("root result Err = %v, want empty", results[0].Errs)
 	}
 
 	foundLink := false
-	for _, e := range results[0].Ret {
+	for _, e := range results[0].Entries {
 		if e.Name() == "dangling" {
 			foundLink = true
 		}
@@ -523,11 +522,11 @@ func TestWalk_NonexistentRoot_ReportsErrorNotFatal(t *testing.T) {
 	if len(results) != 1 {
 		t.Fatalf("got %d results, want 1", len(results))
 	}
-	if results[0].Err == nil {
-		t.Fatal("results[0].Err = nil, want a not-exist error")
+	if len(results[0].Errs) == 0 {
+		t.Fatal("results[0].Err = empty, want a not-exist error")
 	}
-	if !errors.Is(results[0].Err, fs.ErrNotExist) {
-		t.Fatalf("results[0].Err = %v, want fs.ErrNotExist", results[0].Err)
+	if !errors.Is(results[0].Errs[0].Err, fs.ErrNotExist) {
+		t.Fatalf("results[0].Err[0].Err = %v, want fs.ErrNotExist", results[0].Errs[0].Err)
 	}
 }
 
@@ -543,7 +542,7 @@ func TestWalk_RootIsRegularFile_ReportsError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Wait() = %v, want nil", err)
 	}
-	if len(results) != 1 || results[0].Err == nil {
+	if len(results) != 1 || len(results[0].Errs) == 0 {
 		t.Fatalf("results = %+v, want a single error result", results)
 	}
 }
@@ -576,7 +575,7 @@ func TestWalk_PermissionDenied_IsRecoverable(t *testing.T) {
 	for i, r := range results {
 		if r.Dir == locked {
 			lockedResult = &results[i]
-		} else if r.Err == nil {
+		} else if len(r.Errs) == 0 {
 			okCount++
 		}
 	}
@@ -584,11 +583,11 @@ func TestWalk_PermissionDenied_IsRecoverable(t *testing.T) {
 	if lockedResult == nil {
 		t.Fatal("never got a result for the locked directory")
 	}
-	if lockedResult.Err == nil {
-		t.Fatal("locked directory result Err = nil, want a permission error")
+	if len(lockedResult.Errs) == 0 {
+		t.Fatal("locked directory result Err = empty, want a permission error")
 	}
-	if !errors.Is(lockedResult.Err, fs.ErrPermission) {
-		t.Fatalf("locked directory Err = %v, want fs.ErrPermission", lockedResult.Err)
+	if !errors.Is(lockedResult.Errs[0].Err, fs.ErrPermission) {
+		t.Fatalf("locked directory Err = %v, want fs.ErrPermission", lockedResult.Errs[0].Err)
 	}
 
 	// The rest of the tree (root, ok/, also_ok/) should still have been
@@ -883,8 +882,10 @@ func wantCycleErr(t *testing.T, results []WalkResult, err error) {
 func countCycleErrs(results []WalkResult) int {
 	var n int
 	for _, r := range results {
-		if r.Err != nil && strings.Contains(r.Err.Error(), "cycle") {
-			n++
+		for _, ie := range r.Errs {
+			if strings.Contains(ie.Err.Error(), "cycle") {
+				n++
+			}
 		}
 	}
 	return n
@@ -1362,7 +1363,7 @@ func TestWalk_SkipList_LargeMixedFanout(t *testing.T) {
 		if _, skipped := skipNames[base]; skipped {
 			t.Fatalf("walked into skipped subtree: %s", r.Dir)
 		}
-		for _, e := range r.Ret {
+		for _, e := range r.Entries {
 			if _, skipped := skipNames[e.Name()]; skipped {
 				t.Fatalf("skipped entry %q still present in Ret for %s", e.Name(), r.Dir)
 			}
@@ -1376,9 +1377,9 @@ func TestWalk_SkipList_LargeMixedFanout(t *testing.T) {
 			continue
 		}
 		wantRootEntries := total - len(skipNames)
-		if len(r.Ret) != wantRootEntries {
+		if len(r.Entries) != wantRootEntries {
 			t.Fatalf("root Ret has %d entries, want %d (total=%d skipped=%d)",
-				len(r.Ret), wantRootEntries, total, len(skipNames))
+				len(r.Entries), wantRootEntries, total, len(skipNames))
 		}
 	}
 }
