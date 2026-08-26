@@ -863,15 +863,31 @@ func itoa(n int) string {
 	return string(digits)
 }
 
-// wantCycleErr fails the test unless err is non-nil and mentions "cycle".
-func wantCycleErr(t *testing.T, err error) {
+// wantCycleErr fails the test unless: Wait() came back nil (a symlink cycle
+// is a per-entry error, not a fatal one - it must not abort the walk or show
+// up on Wait, same as a permission-denied readDir or a dangling symlink),
+// and at least one drained WalkResult carries an Err mentioning "cycle".
+// (A tree can legitimately trip cycle detection more than once - e.g. two
+// symlinks pointing at each other get caught independently, once from each
+// side - so this only asserts presence, not count.)
+func wantCycleErr(t *testing.T, results []WalkResult, err error) {
 	t.Helper()
-	if err == nil {
-		t.Fatal("Wait() = nil, want a symlink-cycle error")
+	if err != nil {
+		t.Fatalf("Wait() = %v, want nil (symlink cycle is a per-entry error)", err)
 	}
-	if !strings.Contains(err.Error(), "cycle") {
-		t.Fatalf("Wait() = %v, want an error mentioning \"cycle\"", err)
+	if countCycleErrs(results) == 0 {
+		t.Fatal("got 0 results with a cycle error, want at least 1")
 	}
+}
+
+func countCycleErrs(results []WalkResult) int {
+	var n int
+	for _, r := range results {
+		if r.Err != nil && strings.Contains(r.Err.Error(), "cycle") {
+			n++
+		}
+	}
+	return n
 }
 
 // TestWalk_SymlinkCycle_SelfReference covers a symlink that points at the
@@ -889,9 +905,8 @@ func TestWalk_SymlinkCycle_SelfReference(t *testing.T) {
 	}
 
 	w := NewWalkman(true, 0, nil)
-	_, err := drain(t, w, root)
-	// BUG: this no longer works because a symlink is a user controlled error
-	wantCycleErr(t, err)
+	results, err := drain(t, w, root)
+	wantCycleErr(t, results, err)
 }
 
 // TestWalk_SymlinkCycle_ThroughAnotherSymlink is the case the original
@@ -917,8 +932,8 @@ func TestWalk_SymlinkCycle_ThroughAnotherSymlink(t *testing.T) {
 	}
 
 	w := NewWalkman(true, 0, nil)
-	_, err := drain(t, w, root)
-	wantCycleErr(t, err)
+	results, err := drain(t, w, root)
+	wantCycleErr(t, results, err)
 }
 
 // TestWalk_SymlinkCycle_ThroughPlainAncestor is the gap the fix closes: a
@@ -942,8 +957,8 @@ func TestWalk_SymlinkCycle_ThroughPlainAncestor(t *testing.T) {
 	}
 
 	w := NewWalkman(true, 0, nil)
-	_, err := drain(t, w, root)
-	wantCycleErr(t, err)
+	results, err := drain(t, w, root)
+	wantCycleErr(t, results, err)
 }
 
 // TestWalk_SymlinkCycle_BackToRoot checks the root-seeding fix: a symlink
@@ -962,8 +977,8 @@ func TestWalk_SymlinkCycle_BackToRoot(t *testing.T) {
 	}
 
 	w := NewWalkman(true, 0, nil)
-	_, err := drain(t, w, root)
-	wantCycleErr(t, err)
+	results, err := drain(t, w, root)
+	wantCycleErr(t, results, err)
 }
 
 // TestWalk_SymlinkCycle_False_NeverChecked confirms cycle detection is
@@ -1040,10 +1055,11 @@ func TestWalk_SymlinkToFile_NotTreatedAsCycleCandidate(t *testing.T) {
 	}
 }
 
-// TestWalk_SymlinkCycle_ErrorIsFirstAndOnly checks the pool's documented
-// "first error wins, then shuts down" contract actually holds for a cycle
-// error specifically, and that it's the one reported by Wait, not silently
-// swallowed like a per-directory read error would be.
+// TestWalk_SymlinkCycle_ErrorIsFirstAndOnly checks that this single
+// self-referencing symlink - only one cycle-forming context in the whole
+// tree - is reported exactly once, not duplicated, and (since it's a
+// per-entry error, not fatal) doesn't trip the pool's "first error wins,
+// then shuts down" contract or show up on Wait at all.
 func TestWalk_SymlinkCycle_ErrorIsFirstAndOnly(t *testing.T) {
 	root := buildTree(t, []string{
 		"sub/",
@@ -1056,8 +1072,13 @@ func TestWalk_SymlinkCycle_ErrorIsFirstAndOnly(t *testing.T) {
 	}
 
 	w := NewWalkman(true, 0, nil)
-	_, err := drain(t, w, root)
-	wantCycleErr(t, err)
+	results, err := drain(t, w, root)
+	if err != nil {
+		t.Fatalf("Wait() = %v, want nil (symlink cycle is a per-entry error)", err)
+	}
+	if n := countCycleErrs(results); n != 1 {
+		t.Fatalf("got %d results with a cycle error, want exactly 1", n)
+	}
 }
 
 // ---------------------------------------------------------------------
