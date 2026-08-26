@@ -881,7 +881,7 @@ func wantCycleErr(t *testing.T, err error) {
 }
 
 // TestWalk_SymlinkCycle_SelfReference covers a symlink that points at the
-// directory it lives in — the tightest possible cycle.
+// directory it lives in, the tightest possible cycle.
 func TestWalk_SymlinkCycle_SelfReference(t *testing.T) {
 	root := buildTree(t, []string{
 		"sub/",
@@ -896,6 +896,7 @@ func TestWalk_SymlinkCycle_SelfReference(t *testing.T) {
 
 	w := NewWalkman(true, 0, nil)
 	_, err := drain(t, w, root)
+	// BUG: this no longer works because a symlink is a user controlled error
 	wantCycleErr(t, err)
 }
 

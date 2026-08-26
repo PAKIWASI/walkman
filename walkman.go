@@ -14,19 +14,6 @@ import (
 	wsp "github.com/PAKIWASI/workstealpool"
 )
 
-// TODO:
-// LATER:
-// 1. sorting, bfs — the pool delivers WalkResults in true completion
-//    order (whichever worker/thief finishes a directory first), not path
-//    order. Getting a sorted or breadth-first view means buffering results
-//    from the channel and re-ordering on top, as a separate layer — the
-//    pool itself can't give you that for free without giving up stealing.
-// 2. iterator support — once Go's range-over-func (iter.Seq) is in play
-//    here, Walk could return an iterator instead of a channel. Same
-//    ordering caveat as above applies.
-// 3. pipelines?
-
-
 type walkConf struct {
 	followLinks bool   // off by default
 	trackStats  bool   // off by default: every stat is an atomic.Add
@@ -110,7 +97,7 @@ type PoolConfig struct {
 // workload tracks physical/logical core count and then plateaus right at
 // GOMAXPROCS, with a slight regression going meaningfully past it
 // (oversubscription). InitialWorkerCap/ResultBuffSize matter far less
-// (a few hundred µs across their whole sweep) — 32/64 here just matches
+// (a few hundred µs across their whole sweep). 32/64 here just matches
 // the fixed baseline used across their other sweeps, not a walking-specific finding
 func DefaultPoolConfig() PoolConfig {
 	return PoolConfig{
@@ -160,7 +147,7 @@ func NewWalkmanWithConfig(
 
 	// The pool is bound to one Task at construction. Which one we hand it
 	// is the only thing that differs between plain and symlink-following
-	// walks — same item type, same pool, no per-entry branch.
+	// walks. same item type, same pool, no per-entry branch.
 	execute := w.visit
 	if followLinks {
 		execute = w.visitSym
@@ -221,7 +208,7 @@ func filterSkipped(dirs []fs.DirEntry, skip map[string]struct{}) []fs.DirEntry {
 }
 
 // visit is the Task run for every directory the walk encounters. It is
-// called concurrently, from any worker in the pool for different items—
+// called concurrently, from any worker in the pool for different items,
 // so it must not touch anything on Walkman that isn't safe for that
 // (conf is read-only after construction; stats is all atomics).
 func (w *Walkman) visit(
@@ -255,8 +242,7 @@ func (w *Walkman) visit(
 		isDir := mode.IsDir()
 		isSymlink := mode&fs.ModeSymlink != 0
 
-		// this Task never follows symlinks: visitSym is used instead when
-		// followLinks is on (see NewWalkmanWithConfig)
+		// this Task never follows symlinks
 		if isSymlink {
 			linksCount++
 			continue
@@ -304,15 +290,11 @@ func (w *Walkman) visit(
 }
 
 // visitSym is visit's counterpart for followLinks: same item type, same
-// pool, only used when the Walkman was built with followLinks on (see
-// NewWalkmanWithConfig). It additionally resolves symlinked directories and
-// walks into them, guarding against cycles via item.ancestors — the chain
+// pool, only used when the Walkman was built with followLinks on.
+// It additionally resolves symlinked directories and walks into them,
+// guarding against cycles via item.ancestors, the chain
 // of dirKeys (dev+ino) for every directory from root down to here,
-// regardless of whether each hop was a plain directory or a followed
-// symlink. That "regardless" matters: a symlink can point back to an
-// ancestor that was reached by ordinary descent, not just one reached
-// through another symlink, so the chain has to cover both or cycles through
-// a plain ancestor go undetected.
+// regardless of whether each hop was a plain directory or a followed symlink.
 func (w *Walkman) visitSym(
 	_ context.Context,
 	item walkItem,
@@ -347,14 +329,7 @@ func (w *Walkman) visitSym(
 
 		if isSymlink {
 			// followLinks is on, so a symlink is classified by what it
-			// resolves to, not tallied separately — this matches the
-			// reference `ignore` crate's behavior (its DirEntry.file_type()
-			// reports the resolved type once follow_links is set, so it
-			// never reports is_symlink()==true and "links" stays 0).
-			// Earlier this unconditionally bumped a linksCount *and* let a
-			// resolved-to-directory symlink fall through to dirsCount++
-			// below, double-counting that entry. Classifying explicitly
-			// here, once, avoids that.
+			// resolves to, not tallied separately
 			resolvedSym, err := filepath.EvalSymlinks(childPath)
 			if err != nil {
 				// Dangling/unresolvable symlink is a fact about that one
@@ -367,8 +342,8 @@ func (w *Walkman) visitSym(
 				continue
 			}
 			if !info.IsDir() {
-				// Resolves to a non-directory (file, device, etc.) — count
-				// it as a file, same as `ignore` does when following links.
+				// Resolves to a non-directory (file, device, etc)
+				// count it as a file
 				filesCount++
 				continue
 			}
@@ -378,13 +353,17 @@ func (w *Walkman) visitSym(
 			}
 			k := dirKey{dev: uint64(st.Dev), ino: st.Ino}
 
+			// cycle detected: this is a per entry error
 			if item.ancestors.contains(k) {
-				return nil, fmt.Errorf("walkman: symlink cycle: %s -> %s", childPath, resolvedSym)
+				return &WalkResult{
+					Dir: item.path,
+					Err: fmt.Errorf("walkman: symlink cycle: %s -> %s", item.path, childPath),
+				}, nil
 			}
 
 			// A symlink-to-directory entry never has fs.ModeDir set on its
-			// own DirEntry (that's precisely what distinguishes it from a
-			// plain directory at readdir time) — force isDir now that
+			// own DirEntry (that's what distinguishes it from a
+			// plain directory at readdir time). Force isDir now that
 			// we've resolved it, so it's treated as a directory below
 			// instead of falling through to the file-count branch.
 			isDir = true
@@ -406,14 +385,13 @@ func (w *Walkman) visitSym(
 
 		if !isSymlink {
 			// Extend the chain with this plain directory's own key too, so
-			// a symlink further down that points back to it is still
-			// caught (see the doc comment above).
+			// a symlink further down that points back to it is still caught
 			if k, err := statKey(childPath); err == nil {
 				childAncestors = &ancestorNode{key: k, parent: item.ancestors}
 			}
 			// If statKey fails here (e.g. raced away), we simply don't
-			// extend the chain for this branch — same permissive handling
-			// as a dangling symlink above, not a walk-ending error.
+			// extend the chain for this branch. Same permissive handling
+			// as a dangling symlink above, not a walk-ending error
 		}
 
 		spawn(walkItem{
@@ -435,12 +413,8 @@ func (w *Walkman) visitSym(
 		if dirsCount != 0 {
 			w.stats.dirs.Add(dirsCount)
 		}
-		// links deliberately not touched here: with followLinks on, every
-		// symlink is now folded into filesCount or dirsCount above by its
-		// resolved type, matching `ignore`'s behavior of never reporting a
-		// followed entry as a link. The links stat stays meaningful only
-		// for the non-follow path (visit, above), where a symlink is never
-		// resolved or descended into.
+		// links deliberately not touched here. The links stat stays meaningful only for the
+		// non-follow path (visit, above), where a symlink is never resolved or descended into.
 		if maxDepthCount != 0 {
 			w.stats.maxDepthReached.Add(maxDepthCount)
 		}
