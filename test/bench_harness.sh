@@ -30,6 +30,12 @@
 #      1,2,4,8,$(nproc) (configurable) so you get the actual scaling
 #      curve, not one point on it.
 #
+# Pass --follow-links to benchmark both CLIs with symlink-following turned
+# on (forwarded verbatim to both binaries). Off by default, matching each
+# binary's own default. Build the tree with build_tree.sh --links N first
+# so there's actually something to follow — see run_all_symlinks.sh for a
+# ready-made sweep that does this end to end.
+#
 # Requires: hyperfine (https://github.com/sharkdp/hyperfine), zsh (for the
 # `time` builtin used to capture user+sys CPU seconds — bash's own `time`
 # reserved word has no machine-parseable output format, which zsh's does
@@ -52,9 +58,12 @@ IGNORE_PARALLEL_BIN=""
 TREE=""
 WORKERS="1,2,4,$(nproc 2>/dev/null || echo 4)"
 OUT="bench_results.csv"
-MIN_RUNS=15
+MIN_RUNS=10
+MAX_RUNS=""       # empty = default to MIN_RUNS (pinned); see ADAPTIVE below
+ADAPTIVE=0
 WARMUP=5
 COLD=0
+FOLLOW_LINKS=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -64,12 +73,43 @@ while [[ $# -gt 0 ]]; do
     --workers) WORKERS="$2"; shift 2 ;;
     --out)     OUT="$2"; shift 2 ;;
     --min-runs) MIN_RUNS="$2"; shift 2 ;;
+    --max-runs) MAX_RUNS="$2"; shift 2 ;;
+    --adaptive) ADAPTIVE=1; shift 1 ;;
     --warmup)  WARMUP="$2"; shift 2 ;;
     --cold)    COLD=1; shift 1 ;;
+    --follow-links) FOLLOW_LINKS=1; shift 1 ;;
     -h|--help) grep '^#' "$0" | sed 's/^#//'; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 1 ;;
   esac
 done
+
+# hyperfine's own default behavior is "run at least --min-runs, but keep
+# going past that until ~3s of wall time have elapsed" — a floor that's
+# invisible unless you go looking for it. For a fast command (a few tens
+# of ms, like walking the wide/mixed trees) that turns a requested
+# --min-runs 10 into 100-200+ actual runs per (tool, workers) combo, which
+# is where most of this suite's wall time was going. Pinning --max-runs to
+# the same value as --min-runs makes it an exact count instead, with no
+# measurable loss of precision (verified: mean/stddev barely move, run
+# count drops ~10-15x). Pass --adaptive to opt back into hyperfine's
+# default time-based extension, e.g. if a command is noisy enough that 10
+# runs isn't a stable estimate and you want hyperfine to decide when to
+# stop.
+if [[ "$ADAPTIVE" -eq 0 && -z "$MAX_RUNS" ]]; then
+  MAX_RUNS="$MIN_RUNS"
+fi
+MAX_RUNS_FLAG=()
+if [[ -n "$MAX_RUNS" ]]; then
+  MAX_RUNS_FLAG=(--max-runs "$MAX_RUNS")
+fi
+
+# Passed straight through to both CLIs. Off by default, matching each
+# binary's own default, so existing no-symlink callers of this script are
+# unaffected byte-for-byte.
+FOLLOW_FLAG=""
+if [[ "$FOLLOW_LINKS" -eq 1 ]]; then
+  FOLLOW_FLAG="--follow-links"
+fi
 
 for req in WALKMAN_BIN IGNORE_PARALLEL_BIN TREE; do
   if [[ -z "${!req}" ]]; then
@@ -115,7 +155,7 @@ else
   echo "warning: no manifest found at $MANIFEST — tree wasn't built by build_tree.sh, counts unverified" >&2
 fi
 
-echo "tool,workers,mean_wall_s,stddev_wall_s,min_wall_s,max_wall_s,user_s,sys_s" > "$OUT"
+echo "tool,workers,follow_links,mean_wall_s,stddev_wall_s,min_wall_s,max_wall_s,user_s,sys_s" > "$OUT"
 
 # Private per-run scratch dir instead of fixed /tmp filenames. Fixed names
 # are a collision/permission hazard: a leftover file from a prior run —
@@ -146,32 +186,32 @@ capture_cpu_time() {
 # Writes one finished CSV row (hyperfine stats + CPU time together), so
 # there's no separate patch-the-row-after-the-fact step.
 write_row() {
-  local tool="$1" workers="$2" json_file="$3" user="$4" sys="$5"
-  python3 - "$OUT" "$tool" "$workers" "$json_file" "$user" "$sys" <<'PYEOF'
+  local tool="$1" workers="$2" json_file="$3" user="$4" sys="$5" follow="$6"
+  python3 - "$OUT" "$tool" "$workers" "$json_file" "$user" "$sys" "$follow" <<'PYEOF'
 import json, sys
-out, tool, workers, jf, user, sys_t = sys.argv[1:7]
+out, tool, workers, jf, user, sys_t, follow = sys.argv[1:8]
 d = json.load(open(jf))["results"][0]
 with open(out, "a") as f:
-    f.write(f"{tool},{workers},{d['mean']},{d['stddev']},{d['min']},{d['max']},{user},{sys_t}\n")
+    f.write(f"{tool},{workers},{follow},{d['mean']},{d['stddev']},{d['min']},{d['max']},{user},{sys_t}\n")
 PYEOF
 }
 
 IFS=',' read -ra WLIST <<< "$WORKERS"
 
 for w in "${WLIST[@]}"; do
-  echo "=== walkman (Go, workers=$w) ==="
-  CMD="$WALKMAN_BIN --quiet --workers $w '$TREE'"
-  hyperfine --warmup "$WARMUP" --min-runs "$MIN_RUNS" --export-json "$SCRATCH/hf_walkman.json" "$CMD"
+  echo "=== walkman (Go, workers=$w, follow-links=$FOLLOW_LINKS) ==="
+  CMD="$WALKMAN_BIN --quiet --workers $w $FOLLOW_FLAG '$TREE'"
+  hyperfine --warmup "$WARMUP" --min-runs "$MIN_RUNS" "${MAX_RUNS_FLAG[@]}" --export-json "$SCRATCH/hf_walkman.json" "$CMD"
   IFS=',' read -r cpu_user cpu_sys <<< "$(capture_cpu_time "$CMD")"
-  write_row "walkman" "$w" "$SCRATCH/hf_walkman.json" "$cpu_user" "$cpu_sys"
+  write_row "walkman" "$w" "$SCRATCH/hf_walkman.json" "$cpu_user" "$cpu_sys" "$FOLLOW_LINKS"
 done
 
 for w in "${WLIST[@]}"; do
-  echo "=== ignore-parallel-cli (Rust, ignore::WalkParallel, workers=$w) ==="
-  CMD="$IGNORE_PARALLEL_BIN --quiet --workers $w '$TREE'"
-  hyperfine --warmup "$WARMUP" --min-runs "$MIN_RUNS" --export-json "$SCRATCH/hf_ignore_parallel.json" "$CMD"
+  echo "=== ignore-parallel-cli (Rust, ignore::WalkParallel, workers=$w, follow-links=$FOLLOW_LINKS) ==="
+  CMD="$IGNORE_PARALLEL_BIN --quiet --workers $w $FOLLOW_FLAG '$TREE'"
+  hyperfine --warmup "$WARMUP" --min-runs "$MIN_RUNS" "${MAX_RUNS_FLAG[@]}" --export-json "$SCRATCH/hf_ignore_parallel.json" "$CMD"
   IFS=',' read -r cpu_user cpu_sys <<< "$(capture_cpu_time "$CMD")"
-  write_row "ignore-parallel" "$w" "$SCRATCH/hf_ignore_parallel.json" "$cpu_user" "$cpu_sys"
+  write_row "ignore-parallel" "$w" "$SCRATCH/hf_ignore_parallel.json" "$cpu_user" "$cpu_sys" "$FOLLOW_LINKS"
 done
 
 echo "results written to $OUT"

@@ -24,6 +24,12 @@
 # mean +/- stddev for every counter, not just wall time, so you can see
 # *why* one tool is faster/slower, not just that it is.
 #
+# Pass --follow-links to benchmark both CLIs with symlink-following turned
+# on (forwarded verbatim to both binaries). Off by default, matching each
+# binary's own default. Build the tree with build_tree.sh --links N first
+# so there's actually something to follow — see run_all_symlinks.sh for a
+# ready-made sweep that does this end to end.
+#
 # Usage:
 #   ./build_tree.sh --shape wide --root /tmp/tree_wide --seed 42
 #
@@ -32,7 +38,7 @@
 #       --ignore-parallel  ../build/ignore-parallel-cli \
 #       --tree             /tmp/tree_wide \
 #       --workers          "1,2,4,$(nproc)" \
-#       --runs             15 \
+#       --runs             10 \
 #       --out              perf_results.csv
 
 set -euo pipefail
@@ -41,9 +47,10 @@ WALKMAN_BIN=""
 IGNORE_PARALLEL_BIN=""
 TREE=""
 WORKERS="1,2,4,$(nproc 2>/dev/null || echo 4)"
-RUNS=15
+RUNS=10
 WARMUP=3
 OUT="perf_results.csv"
+FOLLOW_LINKS=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -54,10 +61,18 @@ while [[ $# -gt 0 ]]; do
     --runs)    RUNS="$2"; shift 2 ;;
     --warmup)  WARMUP="$2"; shift 2 ;;
     --out)     OUT="$2"; shift 2 ;;
+    --follow-links) FOLLOW_LINKS=1; shift 1 ;;
     -h|--help) grep '^#' "$0" | sed 's/^#//'; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 1 ;;
   esac
 done
+
+# Passed straight through to both CLIs. Off by default, matching each
+# binary's own default, so existing no-symlink callers are unaffected.
+FOLLOW_FLAG=()
+if [[ "$FOLLOW_LINKS" -eq 1 ]]; then
+  FOLLOW_FLAG=(--follow-links)
+fi
 
 for req in WALKMAN_BIN IGNORE_PARALLEL_BIN TREE; do
   if [[ -z "${!req}" ]]; then
@@ -128,7 +143,7 @@ if ! grep -q "task-clock" "$SANITY_OUT"; then
 fi
 rm -f "$SANITY_OUT"
 
-echo "tool,workers,run,task_clock_ms,wall_s,context_switches,cpu_migrations,page_faults,cycles,instructions,cache_misses,user_s,sys_s" > "$OUT"
+echo "tool,workers,follow_links,run,task_clock_ms,wall_s,context_switches,cpu_migrations,page_faults,cycles,instructions,cache_misses,user_s,sys_s" > "$OUT"
 
 # Runs one perf stat invocation, parses its stderr report (perf always
 # writes stats to stderr, stdout is left free for the wrapped program),
@@ -154,10 +169,10 @@ run_once() {
     sed 's/^/    /' "$perf_out" >&2
   fi
 
-  python3 - "$OUT" "$tool" "$workers" "$run_idx" "$perf_out" <<'PYEOF'
+  python3 - "$OUT" "$tool" "$workers" "$FOLLOW_LINKS" "$run_idx" "$perf_out" <<'PYEOF'
 import re, sys
 
-out, tool, workers, run_idx, perf_out = sys.argv[1:6]
+out, tool, workers, follow, run_idx, perf_out = sys.argv[1:7]
 text = open(perf_out).read()
 
 def grab(pattern):
@@ -178,7 +193,7 @@ user = grab(r"([\d.]+)\s+seconds user")
 sys_t = grab(r"([\d.]+)\s+seconds sys")
 
 with open(out, "a") as f:
-    f.write(f"{tool},{workers},{run_idx},{task_clock},{wall},{ctx_sw},{migrations},"
+    f.write(f"{tool},{workers},{follow},{run_idx},{task_clock},{wall},{ctx_sw},{migrations},"
             f"{faults},{cycles},{instr},{cache_miss},{user},{sys_t}\n")
 PYEOF
   rm -f "$perf_out"
@@ -197,15 +212,15 @@ bench_tool() {
 
 IFS=',' read -ra WLIST <<< "$WORKERS"
 for w in "${WLIST[@]}"; do
-  bench_tool "walkman (Go, workers=$w)" \
+  bench_tool "walkman (Go, workers=$w, follow-links=$FOLLOW_LINKS)" \
     "walkman" "$w" \
-    "$WALKMAN_BIN" --quiet --workers "$w" "$TREE"
+    "$WALKMAN_BIN" --quiet --workers "$w" "${FOLLOW_FLAG[@]}" "$TREE"
 done
 
 for w in "${WLIST[@]}"; do
-  bench_tool "ignore-parallel-cli (Rust, ignore::WalkParallel, workers=$w)" \
+  bench_tool "ignore-parallel-cli (Rust, ignore::WalkParallel, workers=$w, follow-links=$FOLLOW_LINKS)" \
     "ignore-parallel" "$w" \
-    "$IGNORE_PARALLEL_BIN" --quiet --workers "$w" "$TREE"
+    "$IGNORE_PARALLEL_BIN" --quiet --workers "$w" "${FOLLOW_FLAG[@]}" "$TREE"
 done
 
 # Integrity check: context-switches and cpu-migrations are software events
@@ -232,7 +247,7 @@ check_all_zero() {
     echo "  Try: sudo sysctl kernel.perf_event_paranoid=-1  (or re-run as root/with CAP_PERFMON)" >&2
   fi
 }
-check_all_zero 6 "context-switches"
-check_all_zero 7 "cpu-migrations"
+check_all_zero 7 "context-switches"
+check_all_zero 8 "cpu-migrations"
 
 echo "results written to $OUT" >&2

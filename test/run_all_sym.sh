@@ -1,42 +1,54 @@
 #!/usr/bin/env bash
-# run_all_benchmarks.sh — runs both benchmark harnesses (hyperfine-based
-# bench_harness.sh and perf-based perf_bench.sh) across all three tree
-# shapes (wide, deep, mixed), and writes correctly-named, non-colliding
-# CSVs for each combination.
+# run_all_symlinks.sh — symlink-focused counterpart to run_all.sh.
 #
-# This exists to fix a real mistake from doing these runs by hand: it's
-# easy to reuse the same --out filename across different --tree shapes
-# and silently overwrite earlier results (this happened in an earlier
-# session — a file named results_wide.csv ended up holding tree_mixed
-# data because the same --out path was passed for a later run). This
-# script hardcodes one filename per (harness, shape) pair specifically
-# to make that mistake impossible.
+# run_all.sh's trees are always built with --links 0 (see build_tree.sh's
+# default), so it never exercises either CLI's --follow-links path. This
+# script builds trees that DO contain symlinks and benchmarks both CLIs
+# with --follow-links ALWAYS on, so the walkman vs ignore::WalkParallel
+# comparison actually covers the code path that resolves a symlink,
+# stats it, and (for followed dirs) recurses into it with cycle
+# detection — not just the plain no-symlinks walk.
 #
-# Output layout (in --out-dir, default ./bench_results/):
+# Deliberately no nofollow mode/baseline here — that's close to what plain
+# run_all.sh already measures (same tree minus a few Lstat calls on the
+# symlinks themselves), so it would double the sweep for marginal new
+# information. This script exists specifically to measure --follow-links,
+# so that's the only thing it runs.
+#
+# Output layout (in --out-dir, default ./bench_results_symlinks/):
 #   hyperfine_wide.csv    hyperfine_deep.csv    hyperfine_mixed.csv
 #   perf_wide.csv         perf_deep.csv         perf_mixed.csv
+# (one hardcoded filename per (harness, shape) pair, same reasoning as
+# run_all.sh: never reuse an --out path across runs that produced
+# different data.)
 #
-# A run_manifest.txt is also written recording exactly which tree
-# (shape/seed/dir+file counts), which binaries, and which workers list
-# produced each file — so six months from now you can tell which run is
-# which without guessing from file mtimes.
+# A run_manifest.txt is written recording exactly which tree (shape/seed/
+# dir+file+LINK counts), which binaries, and which workers list produced
+# each file.
 #
 # Usage (run from walkman/walkman/test/, same directory build_tree.sh,
 # bench_harness.sh, and perf_bench.sh already live in):
-#   ./run_all_benchmarks.sh \
+#   ./run_all_symlinks.sh \
 #       --walkman          ../build/main \
 #       --ignore-parallel  ../build/ignore-parallel-cli \
 #       --workers          "1,2,4,$(nproc)" \
 #       --runs             10 \
-#       --out-dir          bench_results
+#       --links            200 \
+#       --out-dir          bench_results_symlinks
 #
-# Any of --skip-hyperfine / --skip-perf / --shapes can narrow what runs,
-# e.g. to redo just one shape after a fix: --shapes mixed
+# --links N sets how many symlinks build_tree.sh scatters into each tree
+# (default 200). Targets are chosen uniformly at random from every
+# directory in the tree, including descendants of the link's own parent,
+# so this intentionally includes some symlink cycles — both walkman
+# (ancestor dirKey chain) and ignore::WalkParallel (same_file-based) are
+# expected to detect and report those rather than hang, and a sweep that
+# never creates a cycle wouldn't tell you anything about that path.
+#
+# Any of --skip-hyperfine / --skip-perf / --shapes narrow what runs, e.g.
+# to redo just one shape after a fix: --shapes mixed
 #
 # Pass --quick for a fast iteration pass (fewer workers, fewer runs) —
-# see the QUICK block below for exactly what it changes and why. Full
-# default sweep is still the more rigorous option; --quick trades some
-# precision for speed intentionally.
+# see the QUICK block below.
 
 set -euo pipefail
 
@@ -45,10 +57,11 @@ IGNORE_PARALLEL_BIN=""
 WORKERS="1,2,4,$(nproc 2>/dev/null || echo 4)"
 RUNS=10
 WARMUP=5
-OUT_DIR="bench_results"
+OUT_DIR="bench_results_symlinks"
 TREE_ROOT="${TMPDIR:-/tmp}"
 SEED=42
 SHAPES="wide,deep,mixed"
+LINKS=200
 SKIP_HYPERFINE=0
 SKIP_PERF=0
 QUICK=0
@@ -64,6 +77,7 @@ while [[ $# -gt 0 ]]; do
     --tree-root) TREE_ROOT="$2"; shift 2 ;;
     --seed)    SEED="$2"; shift 2 ;;
     --shapes)  SHAPES="$2"; shift 2 ;;
+    --links)   LINKS="$2"; shift 2 ;;
     --skip-hyperfine) SKIP_HYPERFINE=1; shift 1 ;;
     --skip-perf)      SKIP_PERF=1; shift 1 ;;
     --quick)   QUICK=1; shift 1 ;;
@@ -72,18 +86,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# --quick: sane fast-iteration defaults, only applied to values the user
-# didn't already override above (an explicit --workers/--runs/--warmup
-# always wins). Keeps 1 worker (the serial baseline is genuinely useful —
-# it's the only point that shows raw single-thread cost, everything else
-# is a scaling claim relative to it) but drops the sweep to two points
-# (1 and nproc) instead of four, and lowers run/warmup counts. Combined
-# with bench_harness.sh now pinning hyperfine's run count by default
-# (see that script), this cuts a full three-shape sweep from several
-# minutes to well under a minute on a normal machine. Use the full
-# defaults (or hand-pick --workers/--runs) when you want the tighter,
-# more thorough numbers instead — --quick is for "does this look right
-# / did I break something," not for numbers you're about to publish.
+# --quick: same fast-iteration defaults as run_all.sh's --quick (see that
+# script for the reasoning) — narrows the worker sweep to 1,nproc and
+# lowers run/warmup counts. Any explicit --workers/--runs/--warmup you
+# passed above still wins.
 if [[ "$QUICK" -eq 1 ]]; then
   [[ "$WORKERS" == "1,2,4,$(nproc 2>/dev/null || echo 4)" ]] && WORKERS="1,$(nproc 2>/dev/null || echo 4)"
   [[ "$RUNS" == 10 ]] && RUNS=6
@@ -95,6 +101,11 @@ for req in WALKMAN_BIN IGNORE_PARALLEL_BIN; do
     echo "missing required --${req,,} (see --help)" >&2; exit 1
   fi
 done
+
+if [[ "$LINKS" -le 0 ]]; then
+  echo "error: --links must be > 0 (this script exists specifically to exercise symlinks; use run_all.sh for the no-symlinks sweep)" >&2
+  exit 1
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_TREE="$SCRIPT_DIR/build_tree.sh"
@@ -121,14 +132,14 @@ fi
 mkdir -p "$OUT_DIR"
 MANIFEST="$OUT_DIR/run_manifest.txt"
 {
-  echo "run_all_benchmarks.sh — $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+  echo "run_all_symlinks.sh — $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
   echo "host: $(uname -srmo 2>/dev/null || uname -a)"
   echo "cpu:  $(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | sed 's/^ *//' || echo unknown)"
   echo "walkman:          $(realpath -- "$WALKMAN_BIN")"
   echo "ignore-parallel:  $(realpath -- "$IGNORE_PARALLEL_BIN")"
   echo "workers:  $WORKERS"
   echo "runs:     $RUNS   warmup: $WARMUP"
-  echo "seed:     $SEED"
+  echo "seed:     $SEED   links: $LINKS   mode: follow-links only"
   echo ""
 } > "$MANIFEST"
 
@@ -136,24 +147,36 @@ IFS=',' read -ra SHAPE_LIST <<< "$SHAPES"
 FAILURES=()
 
 for shape in "${SHAPE_LIST[@]}"; do
-  tree_path="$TREE_ROOT/tree_${shape}"
+  tree_path="$TREE_ROOT/tree_${shape}_symlinks"
 
   echo "" >&2
   echo "############################################" >&2
-  echo "# shape=$shape" >&2
+  echo "# shape=$shape (links=$LINKS)" >&2
   echo "############################################" >&2
 
-  "$BUILD_TREE" --shape "$shape" --root "$tree_path" --seed "$SEED" | tee -a "$MANIFEST" >&2
+  "$BUILD_TREE" --shape "$shape" --root "$tree_path" --seed "$SEED" --links "$LINKS" | tee -a "$MANIFEST" >&2
 
-  common_args=(--walkman "$WALKMAN_BIN" --ignore-parallel "$IGNORE_PARALLEL_BIN" --tree "$tree_path" --workers "$WORKERS")
+  # Sanity check: build_tree.sh silently drops a link if os.symlink() raises
+  # (e.g. path collision), so a request for --links 200 could quietly land
+  # fewer. Read the actual count back out of the manifest it just wrote
+  # rather than assuming LINKS made it onto disk unchanged.
+  tree_manifest="${tree_path}.manifest"
+  actual_links="$(grep -oP 'links=\K\d+' "$tree_manifest" 2>/dev/null || echo "?")"
+  if [[ "$actual_links" != "$LINKS" ]]; then
+    echo "note: requested --links $LINKS, tree actually has links=$actual_links (see $tree_manifest)" >&2
+  fi
+  if [[ "$actual_links" == "0" ]]; then
+    echo "error: tree at $tree_path has zero symlinks — nothing for --follow-links to exercise. Skipping shape=$shape." >&2
+    FAILURES+=("build/$shape")
+    continue
+  fi
+
+  common_args=(--walkman "$WALKMAN_BIN" --ignore-parallel "$IGNORE_PARALLEL_BIN" --tree "$tree_path" --workers "$WORKERS" --follow-links)
 
   # Each harness call is allowed to fail without taking down the rest of
-  # the sweep — a multi-hour, multi-shape run shouldn't be all-or-nothing.
-  # bench_harness.sh in particular can write a complete, valid CSV and
-  # THEN fail on its own cosmetic summary-table step (e.g. if `column`
-  # isn't installed) — that's not a reason to lose the other 5 runs.
-  # Failures are collected and reported clearly at the end instead of
-  # silently swallowed.
+  # the sweep — same reasoning as run_all.sh: bench_harness.sh can write
+  # a complete, valid CSV and then fail on its own cosmetic
+  # summary-table step, which isn't a reason to lose everything else.
   if [[ $SKIP_HYPERFINE -eq 0 ]]; then
     hf_out="$OUT_DIR/hyperfine_${shape}.csv"
     echo "" >&2
@@ -196,7 +219,7 @@ done
 
 # Cleanup
 
-rm -rf /tmp/tree*
+rm -rf /tmp/tree*_symlinks /tmp/tree*_symlinks.manifest
 
 
 echo "" >&2

@@ -39,9 +39,21 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Dir counts, for reference (total dirs = branch + branch^2 + ... + branch^depth):
+#   wide  (depth=3,  branch=12): ~1.9k dirs
+#   deep  (depth=13, branch=2):  ~16k dirs
+#   mixed (depth=6,  branch=5):  ~19.5k dirs
+# deep used to be depth=18, which is 2^19-2 ≈ 524k dirs / 1.05M files — 270x
+# wide's size and 27x mixed's. That imbalance meant "run all three shapes"
+# was really "wait for one shape to walk a million files, ~15-120+ times
+# depending on the harness," which dominated total sweep time and made
+# cross-shape timing comparisons apples-to-oranges (different topology AND
+# wildly different absolute size). depth=13 keeps deep's defining trait —
+# a long, low-branching dependency chain with little to steal — while
+# landing in the same order of magnitude as the other two shapes.
 case "$SHAPE" in
   wide)  DEPTH=3;  BRANCH=12; FILES_PER_DIR=6 ;;
-  deep)  DEPTH=18; BRANCH=2;  FILES_PER_DIR=2 ;;
+  deep)  DEPTH=13; BRANCH=2;  FILES_PER_DIR=2 ;;
   mixed) DEPTH=6;  BRANCH=5;  FILES_PER_DIR=4 ;;
   *) echo "unknown shape: $SHAPE (want wide|deep|mixed)" >&2; exit 1 ;;
 esac
