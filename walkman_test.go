@@ -646,6 +646,68 @@ func TestWalk_Stats_AccurateCounts(t *testing.T) {
 	}
 }
 
+// TestWalk_Stats_FollowLinks_ClassifiesByResolvedType locks in the fix for
+// a double-counting bug: previously, visitSym bumped a links counter for
+// every symlink unconditionally and then *also* bumped dirsCount for any
+// symlink that resolved to a directory, counting that one entry twice.
+// followLinks now classifies each symlink by what it resolves to (file or
+// dir), matching the reference `ignore` crate's behavior of never
+// reporting a followed entry as a link — so links stays 0 here, a
+// symlink-to-dir counts only under dirs, and a symlink-to-file counts only
+// under files.
+func TestWalk_Stats_FollowLinks_ClassifiesByResolvedType(t *testing.T) {
+	root := buildTree(t, []string{
+		"f1.txt",
+	})
+	skipIfNoSymlinkSupport(t, root)
+
+	// The symlinked directory's target lives outside root's own tree, so
+	// it's reachable *only* through the symlink — if it lived inside root
+	// too (e.g. a sibling "real_dir/"), it would legitimately get walked
+	// twice (once directly, once via the symlink, per walkman's documented
+	// per-path-not-per-inode traversal), which would muddy this count.
+	target := t.TempDir()
+	if err := os.WriteFile(filepath.Join(target, "nested.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	if err := os.Symlink(filepath.Join(root, "f1.txt"), filepath.Join(root, "link_to_file")); err != nil {
+		t.Fatalf("Symlink (file): %v", err)
+	}
+	if err := os.Symlink(target, filepath.Join(root, "link_to_dir")); err != nil {
+		t.Fatalf("Symlink (dir): %v", err)
+	}
+	if err := os.Symlink(filepath.Join(root, "does_not_exist"), filepath.Join(root, "dangling")); err != nil {
+		t.Fatalf("Symlink (dangling): %v", err)
+	}
+
+	pc := PoolConfig{PoolSize: 4, InitialWorkerCap: 8, ResultBuffSize: 8}
+	w := NewWalkmanWithConfig(true, 0, nil, true, pc)
+	if _, err := drain(t, w, root); err != nil {
+		t.Fatalf("Wait() = %v, want nil", err)
+	}
+
+	files, dirs, links, _, _ := w.Stats()
+
+	// Files: f1.txt + link_to_file (resolves to a file) + the resolved
+	// target dir's nested.txt = 3. The dangling symlink resolves to
+	// nothing and is skipped without incrementing any counter.
+	if files != 3 {
+		t.Errorf("stats.files = %d, want 3", files)
+	}
+	// Dirs: link_to_dir (resolves to a directory) = 1. Before the fix this
+	// entry would ALSO have been counted under links, on top of being
+	// counted here.
+	if dirs != 1 {
+		t.Errorf("stats.dirs = %d, want 1", dirs)
+	}
+	// links stays 0: followLinks classifies every resolvable symlink into
+	// files or dirs above, matching `ignore`'s reported behavior.
+	if links != 0 {
+		t.Errorf("stats.links = %d, want 0 (followLinks classifies by resolved type)", links)
+	}
+}
+
 func TestWalk_Stats_OffByDefault(t *testing.T) {
 	root := buildTree(t, []string{"f1.txt", "f2.txt"})
 

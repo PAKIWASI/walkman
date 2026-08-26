@@ -25,12 +25,7 @@ import (
 //    here, Walk could return an iterator instead of a channel. Same
 //    ordering caveat as above applies.
 // 3. pipelines?
-//
-// symlink cycle detection: one walkItem type is used for both modes.
-// ancestors stays nil (zero cost, never touched) unless followLinks is on.
-// Which Task the pool runs — visit or visitSym — is chosen once at
-// construction, not branched per-entry, so the non-symlink path pays
-// nothing beyond the one extra pointer field in walkItem.
+
 
 type walkConf struct {
 	followLinks bool   // off by default
@@ -57,7 +52,7 @@ type WalkResult struct {
 // walkItem is the actual work-stealing pool item. ancestors is only ever
 // non-nil when followLinks is on (visitSym populates it; visit ignores it
 // and always spawns with it left at its zero value), so plain walks pay
-// only for the width of one extra pointer field, never for what it points to.
+// only for the width of one extra pointer field
 type walkItem struct {
 	depth     uint32
 	path      string
@@ -338,7 +333,7 @@ func (w *Walkman) visitSym(
 	// Local, non-atomic counters accumulated across every entry in this
 	// directory; the atomics (one per counter, not per entry) only get
 	// touched once, after the loop, and only if trackStats is on at all.
-	var filesCount, dirsCount, linksCount, maxDepthCount uint32
+	var filesCount, dirsCount, maxDepthCount uint32
 
 	for i := range dirs {
 		entry := dirs[i]
@@ -351,8 +346,15 @@ func (w *Walkman) visitSym(
 		isSymlink := mode&fs.ModeSymlink != 0
 
 		if isSymlink {
-			linksCount++
-
+			// followLinks is on, so a symlink is classified by what it
+			// resolves to, not tallied separately — this matches the
+			// reference `ignore` crate's behavior (its DirEntry.file_type()
+			// reports the resolved type once follow_links is set, so it
+			// never reports is_symlink()==true and "links" stays 0).
+			// Earlier this unconditionally bumped a linksCount *and* let a
+			// resolved-to-directory symlink fall through to dirsCount++
+			// below, double-counting that entry. Classifying explicitly
+			// here, once, avoids that.
 			resolvedSym, err := filepath.EvalSymlinks(childPath)
 			if err != nil {
 				// Dangling/unresolvable symlink is a fact about that one
@@ -361,7 +363,13 @@ func (w *Walkman) visitSym(
 			}
 
 			info, err := os.Lstat(resolvedSym)
-			if err != nil || !info.IsDir() {
+			if err != nil {
+				continue
+			}
+			if !info.IsDir() {
+				// Resolves to a non-directory (file, device, etc.) — count
+				// it as a file, same as `ignore` does when following links.
+				filesCount++
 				continue
 			}
 			st, ok := info.Sys().(*syscall.Stat_t)
@@ -427,9 +435,12 @@ func (w *Walkman) visitSym(
 		if dirsCount != 0 {
 			w.stats.dirs.Add(dirsCount)
 		}
-		if linksCount != 0 {
-			w.stats.links.Add(linksCount)
-		}
+		// links deliberately not touched here: with followLinks on, every
+		// symlink is now folded into filesCount or dirsCount above by its
+		// resolved type, matching `ignore`'s behavior of never reporting a
+		// followed entry as a link. The links stat stays meaningful only
+		// for the non-follow path (visit, above), where a symlink is never
+		// resolved or descended into.
 		if maxDepthCount != 0 {
 			w.stats.maxDepthReached.Add(maxDepthCount)
 		}

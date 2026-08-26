@@ -60,7 +60,7 @@ func main() {
 	}
 
 	runOnce := func() (files, dirs, links, errs uint64, elapsed time.Duration) {
-		w := walkman.NewWalkmanWithConfig(*followLinks, uint32(*maxDepth), skip, false, pc)
+		w := walkman.NewWalkmanWithConfig(*followLinks, uint32(*maxDepth), skip, true, pc)
 		start := time.Now()
 		for r := range w.Walk(root) {
 			if r.Err != nil {
@@ -70,25 +70,28 @@ func main() {
 				}
 				continue
 			}
+			if !*print {
+				continue
+			}
 			for _, e := range r.Ret {
-				// DirEntry.Type() reflects the raw dirent (not stat'd), so
-				// a symlink shows up as ModeSymlink, never as IsDir() —
-				// check symlink first, same ordering walkdir-cli uses.
 				t := e.Type()
 				kind := "f"
 				switch {
+				case t&fs.ModeSymlink != 0 && *followLinks:
+					full := r.Dir + "/" + e.Name()
+					info, err := os.Stat(full) // Stat follows the symlink
+					switch {
+					case err != nil:
+						continue
+					case info.IsDir():
+						kind = "d"
+					}
 				case t&fs.ModeSymlink != 0:
-					links++
 					kind = "l"
 				case t.IsDir():
-					dirs++
 					kind = "d"
-				default:
-					files++
 				}
-				if *print {
-					fmt.Printf("%s  %s\n", kind, r.Dir+"/"+e.Name())
-				}
+				fmt.Printf("%s  %s\n", kind, r.Dir+"/"+e.Name())
 			}
 		}
 		elapsed = time.Since(start)
@@ -96,6 +99,8 @@ func main() {
 			fmt.Fprintf(os.Stderr, "walk failed: %v\n", err)
 			os.Exit(1)
 		}
+		f, d, l, _, _ := w.Stats()
+		files, dirs, links = uint64(f), uint64(d), uint64(l)
 		return
 	}
 

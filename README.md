@@ -232,8 +232,6 @@ cd test
 
 Or run one shape/harness at a time with `build_tree.sh` + `bench_harness.sh` (hyperfine) / `perf_bench.sh` (perf counters) — see each script's `--help`.
 
-`ignore-parallel-cli` build pin: `rustc`/`cargo` 1.75.0, `ignore = "=0.4.16"`, `globset` pinned to `0.4.16` (newer releases require the `edition2024` Cargo feature, ~1.85+ toolchain), `--release` profile, `opt-level = 3`, `lto = true`.
-
 ## Testing
 
 ```bash
