@@ -447,10 +447,6 @@ func TestWalk_FollowLinks_True_Descends(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(target, "inside.txt"), []byte("x"), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	realTarget, err := filepath.EvalSymlinks(target)
-	if err != nil {
-		t.Fatalf("EvalSymlinks(target): %v", err)
-	}
 
 	link := filepath.Join(root, "link_to_target")
 	if err := os.Symlink(target, link); err != nil {
@@ -463,14 +459,30 @@ func TestWalk_FollowLinks_True_Descends(t *testing.T) {
 		t.Fatalf("Wait() = %v, want nil", err)
 	}
 
-	found := false
-	for _, r := range results {
-		if r.Dir == realTarget {
-			found = true
+	// walkman reports the symlink's own path here, not a canonicalized
+	// target path - matching walkdir's own documented contract ("the
+	// yielded DirEntry represents the target... while the path corresponds
+	// to the link"). It's not resolved via filepath.EvalSymlinks.
+	var found *WalkResult
+	for i := range results {
+		if results[i].Dir == link {
+			found = &results[i]
 		}
 	}
-	if !found {
-		t.Fatalf("followLinks=true but never walked into resolved symlink target %s; visited %v", realTarget, walkedDirs(results))
+	if found == nil {
+		t.Fatalf("followLinks=true but never walked into %s (the symlink's own path); visited %v", link, walkedDirs(results))
+	}
+
+	// Path equality alone doesn't prove the right directory was actually
+	// read - confirm its contents came through too.
+	gotInside := false
+	for _, e := range found.Entries {
+		if e.Name() == "inside.txt" {
+			gotInside = true
+		}
+	}
+	if !gotInside {
+		t.Fatalf("walked into %s but didn't read the target's contents (missing inside.txt); entries=%v", link, found.Entries)
 	}
 }
 

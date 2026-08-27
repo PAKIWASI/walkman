@@ -23,7 +23,7 @@
 #
 # Usage (run from walkman/walkman/test/, same directory build_tree.sh,
 # bench_harness.sh, and perf_bench.sh already live in):
-#   ./run_all_benchmarks.sh \
+#   ./run_all.sh \
 #       --walkman          ../build/main \
 #       --ignore-parallel  ../build/ignore-parallel-cli \
 #       --workers          "1,2,4,$(nproc)" \

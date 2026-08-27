@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run_all_symlinks.sh — symlink-focused counterpart to run_all.sh.
+# symlink-focused counterpart to run_all.sh.
 #
 # run_all.sh's trees are always built with --links 0 (see build_tree.sh's
 # default), so it never exercises either CLI's --follow-links path. This
@@ -28,7 +28,7 @@
 #
 # Usage (run from walkman/walkman/test/, same directory build_tree.sh,
 # bench_harness.sh, and perf_bench.sh already live in):
-#   ./run_all_symlinks.sh \
+#   ./run_all_sym.sh \
 #       --walkman          ../build/main \
 #       --ignore-parallel  ../build/ignore-parallel-cli \
 #       --workers          "1,2,4,$(nproc)" \
