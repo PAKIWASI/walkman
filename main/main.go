@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"runtime"
 	"strings"
 	"time"
 
@@ -46,58 +45,68 @@ func main() {
 		skip = strings.Split(*skipStr, ",")
 	}
 
-	pc := walkman.PoolConfig{
-		PoolSize:         *workers,
-		InitialWorkerCap: 64,
-		ResultBuffSize:   128,
-	}
-	if pc.PoolSize == 0 {
-		pc.PoolSize = runtime.GOMAXPROCS(0)
+	pc := walkman.DefaultPoolConfig()
+	if *workers > 0 {
+		pc.PoolSize = *workers
 	}
 
+	needPrint := *print
+	needCounts := !*quiet || *bench == 0 || needPrint
+
 	runOnce := func() (files, dirs, links, errs uint32, elapsed time.Duration) {
-		w := walkman.NewWalkmanWithConfig(*followLinks, uint32(*maxDepth), skip, true, pc)
+		w := walkman.NewWalkmanWithConfig(*followLinks, uint32(*maxDepth), skip, pc)
 		start := time.Now()
 
 		for r := range w.Walk(root) {
 			if n := len(r.Errs); n != 0 {
 				errs += uint32(n)
-				if *print {
+				if needPrint {
 					for _, ie := range r.Errs {
 						fmt.Fprintf(os.Stderr, "error: %s %v\n", ie.Name, ie.Err)
 					}
 				}
 			}
-			if !*print || r.Entries == nil {
+
+			if r.Entries == nil {
 				continue
 			}
-			for _, e := range r.Entries {
-				t := e.Type()
-				kind := "f"
-				switch {
-				case t&fs.ModeSymlink != 0 && *followLinks:
-					full := r.Dir + "/" + e.Name()
-					info, err := os.Stat(full) // Stat follows the symlink
+
+			if needPrint {
+				for _, e := range r.Entries {
+					t := e.Type()
+					kind := "f"
 					switch {
-					case err != nil:
-						continue
-					case info.IsDir():
+					case t&fs.ModeSymlink != 0:
+						kind = "l"
+						links++
+					case t.IsDir():
 						kind = "d"
+						dirs++
+					default:
+						files++
 					}
-				case t&fs.ModeSymlink != 0:
-					kind = "l"
-				case t.IsDir():
-					kind = "d"
+					fmt.Printf("%s  %s/%s\n", kind, r.Dir, e.Name())
 				}
-				fmt.Printf("%s  %s\n", kind, r.Dir+"/"+e.Name())
+			} else if needCounts {
+				for _, e := range r.Entries {
+					t := e.Type()
+					switch {
+					case t&fs.ModeSymlink != 0:
+						links++
+					case t.IsDir():
+						dirs++
+					default:
+						files++
+					}
+				}
 			}
 		}
+
 		elapsed = time.Since(start)
 		if err := w.Wait(); err != nil {
 			fmt.Fprintf(os.Stderr, "walk failed: %v\n", err)
 			os.Exit(1)
 		}
-		files, dirs, links = w.Stats()
 		return
 	}
 

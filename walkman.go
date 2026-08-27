@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sync/atomic"
 	"syscall"
 
 	wsp "github.com/PAKIWASI/workstealpool"
@@ -22,15 +21,8 @@ var (
 
 type walkConf struct {
 	followLinks bool // off by default
-	trackStats  bool
 	maxDepth    uint32 // 0 means unlimited
 	skipSet     map[string]struct{}
-}
-
-type walkStats struct {
-	files atomic.Uint32
-	dirs  atomic.Uint32
-	links atomic.Uint32
 }
 
 // DirErr is one error encountered while producing a WalkResult.
@@ -145,26 +137,22 @@ func DefaultPoolConfig() PoolConfig {
 }
 
 type Walkman struct {
-	conf  walkConf
-	stats walkStats
-	pool  *wsp.WorkerPool[walkItem, WalkResult]
+	conf walkConf
+	pool *wsp.WorkerPool[walkItem, WalkResult]
 }
 
-// NewWalkman builds a Walkman with GOMAXPROCS-based pool sizing and stats
-// tracking off. Use NewWalkmanWithConfig for explicit pool sizing or to turn stats on.
+// NewWalkman builds a Walkman with GOMAXPROCS-based pool sizing.
+// Use NewWalkmanWithConfig for explicit pool sizing.
 func NewWalkman(followLinks bool, maxDepth uint32, skipList []string) *Walkman {
-	return NewWalkmanWithConfig(followLinks, maxDepth, skipList, false, DefaultPoolConfig())
+	return NewWalkmanWithConfig(followLinks, maxDepth, skipList, DefaultPoolConfig())
 }
 
-// NewWalkmanWithConfig is NewWalkman but with every knob explicit: whether
-// to track walkStats (costs an atomic.Add per entry when on), and pool
-// sizing, for callers who've measured what suits their workload rather
-// than accepting the defaults.
+// NewWalkmanWithConfig is NewWalkman but with explicit pool sizing, for
+// callers who've measured what suits their workload rather than accepting the defaults.
 func NewWalkmanWithConfig(
 	followLinks bool,
 	maxDepth uint32,
 	skipList []string,
-	trackStats bool,
 	pc PoolConfig,
 ) *Walkman {
 
@@ -177,7 +165,6 @@ func NewWalkmanWithConfig(
 		conf: walkConf{
 			followLinks: followLinks,
 			maxDepth:    maxDepth,
-			trackStats:  trackStats,
 			skipSet:     skipSet,
 		},
 	}
@@ -245,7 +232,7 @@ func filterSkipped(dirs []fs.DirEntry, skip map[string]struct{}) []fs.DirEntry {
 // visit is the Task run for every directory the walk encounters. It is
 // called concurrently, from any worker in the pool for different items,
 // so it must not touch anything on Walkman that isn't safe for that
-// (conf is read-only after construction; stats is all atomics).
+// (conf is read-only after construction).
 func (w *Walkman) visit(
 	_ context.Context,
 	item walkItem,
@@ -266,11 +253,6 @@ func (w *Walkman) visit(
 		dirs = filterSkipped(dirs, w.conf.skipSet)
 	}
 
-	// Local, non-atomic counters accumulated across every entry in this
-	// directory; the atomics (one per counter, not per entry) only get
-	// touched once, after the loop, and only if trackStats is on at all.
-	var fileCount, dirCount, linkCount uint32
-
 	for i := range dirs {
 		entry := dirs[i]
 
@@ -280,15 +262,12 @@ func (w *Walkman) visit(
 
 		// this Task never follows symlinks
 		if isSymlink {
-			linkCount++
 			continue
 		}
 
 		if !isDir {
-			fileCount++
 			continue
 		}
-		dirCount++
 
 		if w.conf.maxDepth != 0 && item.depth+1 > w.conf.maxDepth {
 			continue
@@ -298,19 +277,6 @@ func (w *Walkman) visit(
 			path:  join(item.path, entry.Name()),
 			depth: item.depth + 1,
 		})
-	}
-
-	if w.conf.trackStats {
-		// atomic additions cost isn't irrelevent
-		if fileCount != 0 {
-			w.stats.files.Add(fileCount)
-		}
-		if dirCount != 0 {
-			w.stats.dirs.Add(dirCount)
-		}
-		if linkCount != 0 {
-			w.stats.links.Add(linkCount)
-		}
 	}
 
 	return &WalkResult{Dir: item.path, Entries: dirs}, nil
@@ -338,11 +304,6 @@ func (w *Walkman) visitSym(
 		dirs = filterSkipped(dirs, w.conf.skipSet)
 	}
 
-	// Local, non-atomic counters accumulated across every entry in this
-	// directory; the atomics (one per counter, not per entry) only get
-	// touched once, after the loop, and only if trackStats is on at all.
-	var fileCount, dirCount uint32
-
 	// Err field is nil until the first problem, which is the common case
 	result := WalkResult{Dir: item.path, Entries: dirs}
 
@@ -358,21 +319,15 @@ func (w *Walkman) visitSym(
 
 		if isSymlink {
 			// followLinks is on, so a symlink is classified by what it
-			// resolves to, not tallied separately. One os.Stat resolves the
-			// whole chain (however many hops) in a single syscall
+			// resolves to. One os.Stat resolves the whole chain
 			info, err := os.Stat(childPath)
 			if err != nil {
-				// Dangling/unresolvable symlink is a fact about that one
-				// entry, not a reason to fail the whole walk and not an
-				// error at all, just a common, expected condition. Same
-				// silent, permissive handling as before.
+				// Dangling/unresolvable symlink is skipped.
 				continue
 			}
 
 			if !info.IsDir() {
 				// Resolves to a non-directory (file, device, etc)
-				// count it as a file
-				fileCount++
 				continue
 			}
 			st, ok := info.Sys().(*syscall.Stat_t)
@@ -383,30 +338,20 @@ func (w *Walkman) visitSym(
 
 			// Cycle detected: record it against this one entry and skip
 			// descending into it, but keep processing the rest of dirs.
-			// containsTarget Lstat's each ancestor on demand rather than
-			// consulting a chain built by pre-resolving every plain directory on the way here.
 			if item.ancestors.containsTarget(k) {
 				result.Errs = append(result.Errs, DirErr{Name: entry.Name(), Err: errSymlinkCycle})
 				continue
 			}
 
 			// A symlink-to-directory entry never has fs.ModeDir set on its
-			// own DirEntry (that's what distinguishes it from a
-			// plain directory at readdir time). Force isDir now that
-			// we've resolved it, so it's treated as a directory below
-			// instead of falling through to the file-count branch.
+			// own DirEntry. Force isDir now that we've resolved it.
 			isDir = true
-			// childPath is deliberately left as the symlink's own path
-			// (join(item.path, entry.Name())), not a canonicalized target.
-			// Opening it still transparently follows the link
 			childAncestors = &ancestorNode{path: childPath, parent: item.ancestors}
 		}
 
 		if !isDir {
-			fileCount++
 			continue
 		}
-		dirCount++
 
 		if w.conf.maxDepth != 0 && item.depth+1 > w.conf.maxDepth {
 			continue
@@ -423,15 +368,6 @@ func (w *Walkman) visitSym(
 			depth:     item.depth + 1,
 			ancestors: childAncestors,
 		})
-	}
-
-	if w.conf.trackStats {
-		if fileCount != 0 {
-			w.stats.files.Add(fileCount)
-		}
-		if dirCount != 0 {
-			w.stats.dirs.Add(dirCount)
-		}
 	}
 
 	return &result, nil
@@ -464,10 +400,4 @@ func (w *Walkman) Walk(root string) <-chan WalkResult {
 // draining the channel returned by Walk
 func (w *Walkman) Wait() error {
 	return w.pool.Wait()
-}
-
-func (w *Walkman) Stats() (files, dirs, links uint32) {
-	return w.stats.files.Load(),
-		w.stats.dirs.Load(),
-		w.stats.links.Load()
 }

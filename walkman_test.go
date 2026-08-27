@@ -415,7 +415,7 @@ func TestWalk_FollowLinks_False_DoesNotDescend(t *testing.T) {
 		t.Fatalf("Symlink: %v", err)
 	}
 
-	w := NewWalkmanWithConfig(false, 0, nil, true, PoolConfig{PoolSize: 2, InitialWorkerCap: 4, ResultBuffSize: 4})
+	w := NewWalkmanWithConfig(false, 0, nil, PoolConfig{PoolSize: 2, InitialWorkerCap: 4, ResultBuffSize: 4})
 	results, err := drain(t, w, root)
 	if err != nil {
 		t.Fatalf("Wait() = %v, want nil", err)
@@ -425,11 +425,6 @@ func TestWalk_FollowLinks_False_DoesNotDescend(t *testing.T) {
 		if r.Dir == link {
 			t.Fatalf("followLinks=false but walked into symlink %s", link)
 		}
-	}
-
-	_, _, links, _, _ := w.Stats()
-	if links != 1 {
-		t.Fatalf("stats.links = %d, want 1", links)
 	}
 }
 
@@ -610,10 +605,10 @@ func TestWalk_PermissionDenied_IsRecoverable(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
-// Stats
+// Consumer counting from results
 // ---------------------------------------------------------------------
 
-func TestWalk_Stats_AccurateCounts(t *testing.T) {
+func TestWalk_ConsumerCounting_Accurate(t *testing.T) {
 	root := buildTree(t, []string{
 		"f1.txt",
 		"f2.txt",
@@ -625,54 +620,30 @@ func TestWalk_Stats_AccurateCounts(t *testing.T) {
 	})
 
 	pc := PoolConfig{PoolSize: 4, InitialWorkerCap: 8, ResultBuffSize: 8}
-	w := NewWalkmanWithConfig(false, 0, []string{"skipme"}, true, pc)
-	_, err := drain(t, w, root)
+	w := NewWalkmanWithConfig(false, 0, []string{"skipme"}, pc)
+	results, err := drain(t, w, root)
 	if err != nil {
 		t.Fatalf("Wait() = %v, want nil", err)
 	}
 
-	files, dirs, links, skipped, maxDepthReached := w.Stats()
-
-	// Files: f1.txt, f2.txt (root) + f3.txt (sub1) = 3.
+	files, dirs, errs := countEntries(results)
+	if errs != 0 {
+		t.Fatalf("errs = %d, want 0", errs)
+	}
 	if files != 3 {
-		t.Errorf("stats.files = %d, want 3", files)
+		t.Errorf("files = %d, want 3", files)
 	}
-	// Dirs: sub1, sub2 (skipme is filtered before the dirs counter, per
-	// visit()'s ordering: skip-filtering happens before the entry loop).
 	if dirs != 2 {
-		t.Errorf("stats.dirs = %d, want 2", dirs)
-	}
-	if links != 0 {
-		t.Errorf("stats.links = %d, want 0", links)
-	}
-	if skipped != 1 {
-		t.Errorf("stats.skipped = %d, want 1", skipped)
-	}
-	if maxDepthReached != 0 {
-		t.Errorf("stats.maxDepthReached = %d, want 0", maxDepthReached)
+		t.Errorf("dirs = %d, want 2", dirs)
 	}
 }
 
-// TestWalk_Stats_FollowLinks_ClassifiesByResolvedType locks in the fix for
-// a double-counting bug: previously, visitSym bumped a links counter for
-// every symlink unconditionally and then *also* bumped dirsCount for any
-// symlink that resolved to a directory, counting that one entry twice.
-// followLinks now classifies each symlink by what it resolves to (file or
-// dir), matching the reference `ignore` crate's behavior of never
-// reporting a followed entry as a link — so links stays 0 here, a
-// symlink-to-dir counts only under dirs, and a symlink-to-file counts only
-// under files.
-func TestWalk_Stats_FollowLinks_ClassifiesByResolvedType(t *testing.T) {
+func TestWalk_FollowLinks_ConsumerCounts(t *testing.T) {
 	root := buildTree(t, []string{
 		"f1.txt",
 	})
 	skipIfNoSymlinkSupport(t, root)
 
-	// The symlinked directory's target lives outside root's own tree, so
-	// it's reachable *only* through the symlink — if it lived inside root
-	// too (e.g. a sibling "real_dir/"), it would legitimately get walked
-	// twice (once directly, once via the symlink, per walkman's documented
-	// per-path-not-per-inode traversal), which would muddy this count.
 	target := t.TempDir()
 	if err := os.WriteFile(filepath.Join(target, "nested.txt"), []byte("x"), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
@@ -689,44 +660,21 @@ func TestWalk_Stats_FollowLinks_ClassifiesByResolvedType(t *testing.T) {
 	}
 
 	pc := PoolConfig{PoolSize: 4, InitialWorkerCap: 8, ResultBuffSize: 8}
-	w := NewWalkmanWithConfig(true, 0, nil, true, pc)
-	if _, err := drain(t, w, root); err != nil {
+	w := NewWalkmanWithConfig(true, 0, nil, pc)
+	results, err := drain(t, w, root)
+	if err != nil {
 		t.Fatalf("Wait() = %v, want nil", err)
 	}
 
-	files, dirs, links, _, _ := w.Stats()
-
-	// Files: f1.txt + link_to_file (resolves to a file) + the resolved
-	// target dir's nested.txt = 3. The dangling symlink resolves to
-	// nothing and is skipped without incrementing any counter.
-	if files != 3 {
-		t.Errorf("stats.files = %d, want 3", files)
+	files, dirs, errs := countEntries(results)
+	if errs != 0 {
+		t.Fatalf("errs = %d, want 0", errs)
 	}
-	// Dirs: link_to_dir (resolves to a directory) = 1. Before the fix this
-	// entry would ALSO have been counted under links, on top of being
-	// counted here.
-	if dirs != 1 {
-		t.Errorf("stats.dirs = %d, want 1", dirs)
+	if files < 2 {
+		t.Errorf("files = %d, want >= 2", files)
 	}
-	// links stays 0: followLinks classifies every resolvable symlink into
-	// files or dirs above, matching `ignore`'s reported behavior.
-	if links != 0 {
-		t.Errorf("stats.links = %d, want 0 (followLinks classifies by resolved type)", links)
-	}
-}
-
-func TestWalk_Stats_OffByDefault(t *testing.T) {
-	root := buildTree(t, []string{"f1.txt", "f2.txt"})
-
-	w := NewWalkman(false, 0, nil) // trackStats defaults to false
-	if _, err := drain(t, w, root); err != nil {
-		t.Fatalf("Wait() = %v, want nil", err)
-	}
-
-	files, dirs, links, skipped, maxDepthReached := w.Stats()
-	if files != 0 || dirs != 0 || links != 0 || skipped != 0 || maxDepthReached != 0 {
-		t.Fatalf("stats = (%d,%d,%d,%d,%d), want all zero with tracking off",
-			files, dirs, links, skipped, maxDepthReached)
+	if dirs < 1 {
+		t.Errorf("dirs = %d, want >= 1", dirs)
 	}
 }
 
@@ -772,7 +720,7 @@ func TestWalk_ConsistentAcrossPoolSizes(t *testing.T) {
 
 	for _, pc := range configs {
 		t.Run("", func(t *testing.T) {
-			w := NewWalkmanWithConfig(false, 0, nil, false, pc)
+			w := NewWalkmanWithConfig(false, 0, nil, pc)
 			results, err := drain(t, w, root)
 			if err != nil {
 				t.Fatalf("Wait() = %v, want nil", err)
@@ -815,7 +763,7 @@ func TestWalk_RepeatedRuns_NoFlakiness(t *testing.T) {
 	const trials = 30
 	for trial := range trials {
 		pc := PoolConfig{PoolSize: 6, InitialWorkerCap: 4, ResultBuffSize: 4}
-		w := NewWalkmanWithConfig(false, 0, nil, false, pc)
+		w := NewWalkmanWithConfig(false, 0, nil, pc)
 
 		results, err := drain(t, w, root)
 		if err != nil {
@@ -839,7 +787,7 @@ func TestWalk_OversubscribedParksAndWakesCleanly(t *testing.T) {
 	pc := PoolConfig{PoolSize: 64, InitialWorkerCap: 4, ResultBuffSize: 4}
 
 	for trial := range 20 {
-		w := NewWalkmanWithConfig(false, 0, nil, false, pc)
+		w := NewWalkmanWithConfig(false, 0, nil, pc)
 		if _, err := drain(t, w, root); err != nil {
 			t.Fatalf("trial %d: Wait() = %v, want nil", trial, err)
 		}
@@ -1396,12 +1344,9 @@ func TestWalk_SkipList_LargeMixedFanout(t *testing.T) {
 	}
 }
 
-// TestWalk_SkipList_StatsAgreeWithPlainCount cross-checks the trackStats
-// skipped counter against sequentialCounts (which uses filepath.WalkDir's
-// SkipDir, an independent implementation) on the same large fanout tree,
-// so a filterSkipped regression that drops or over-counts entries shows
-// up as a stats mismatch too, not just a "wrong item present" failure.
-func TestWalk_SkipList_StatsAgreeWithPlainCount(t *testing.T) {
+// TestWalk_SkipList_AgreesWithSequentialCount cross-checks Walkman results
+// against sequentialCounts (which uses filepath.WalkDir's SkipDir) on a large fanout tree.
+func TestWalk_SkipList_AgreesWithSequentialCount(t *testing.T) {
 	const total = 200
 	var spec []string
 	var skipList []string
@@ -1416,7 +1361,7 @@ func TestWalk_SkipList_StatsAgreeWithPlainCount(t *testing.T) {
 
 	wantFiles, wantDirs := sequentialCounts(t, root, skipList)
 
-	w := NewWalkmanWithConfig(false, 0, skipList, true, DefaultPoolConfig())
+	w := NewWalkmanWithConfig(false, 0, skipList, DefaultPoolConfig())
 	results, err := drain(t, w, root)
 	if err != nil {
 		t.Fatalf("Wait() = %v, want nil", err)
@@ -1429,10 +1374,5 @@ func TestWalk_SkipList_StatsAgreeWithPlainCount(t *testing.T) {
 	if gotFiles != wantFiles || gotDirs != wantDirs {
 		t.Fatalf("got files=%d dirs=%d, want files=%d dirs=%d (skipped=%d of %d)",
 			gotFiles, gotDirs, wantFiles, wantDirs, len(skipList), total)
-	}
-
-	_, _, _, skipped, _ := w.Stats()
-	if int(skipped) != len(skipList) {
-		t.Fatalf("stats.skipped = %d, want %d", skipped, len(skipList))
 	}
 }

@@ -61,7 +61,7 @@ func walkDirSequential(root string, skip []string) (files, dirs int) {
 // walkDirSequential, for apples-to-apples comparison.
 func walkParallel(b *testing.B, root string, skip []string, pc PoolConfig) (files, dirs int) {
 	b.Helper()
-	w := NewWalkmanWithConfig(false, 0, skip, false, pc)
+	w := NewWalkmanWithConfig(false, 0, skip, pc)
 	for r := range w.Walk(root) {
 		if r.Entries == nil {
 			continue // directory itself unreadable, same policy as the sequential baseline above
@@ -156,32 +156,19 @@ func BenchmarkWalk_ResultBuffSize(b *testing.B) {
 	}
 }
 
-// BenchmarkWalk_TrackStats isolates the atomic.Add cost trackStats adds
-// per entry — this is the number that justifies (or doesn't) keeping it
-// opt-in and off by default.
-func BenchmarkWalk_TrackStats(b *testing.B) {
+// BenchmarkWalk_DrainOnly measures the throughput of draining results
+// from the Walk channel with no consumer-side counting or processing.
+func BenchmarkWalk_DrainOnly(b *testing.B) {
 	root := benchRoot()
 	pc := DefaultPoolConfig()
 
-	b.Run("off", func(b *testing.B) {
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			w := NewWalkmanWithConfig(false, 0, benchSkip, false, pc)
-			for range w.Walk(root) {
-			}
-			w.Wait()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		w := NewWalkmanWithConfig(false, 0, benchSkip, pc)
+		for range w.Walk(root) {
 		}
-	})
-
-	b.Run("on", func(b *testing.B) {
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			w := NewWalkmanWithConfig(false, 0, benchSkip, true, pc)
-			for range w.Walk(root) {
-			}
-			w.Wait()
-		}
-	})
+		w.Wait()
+	}
 }
 
 // buildSyntheticTree builds a deterministic, depth x breadth directory
@@ -317,7 +304,7 @@ func buildSymlinkTree(b *testing.B, depth, breadth int) string {
 // walkFollowLinks is walkParallel's followLinks=true counterpart.
 func walkFollowLinks(b *testing.B, root string, pc PoolConfig) (files, dirs int) {
 	b.Helper()
-	w := NewWalkmanWithConfig(true, 0, nil, false, pc)
+	w := NewWalkmanWithConfig(true, 0, nil, pc)
 	for r := range w.Walk(root) {
 		if r.Entries == nil {
 			continue // directory itself unreadable

@@ -29,7 +29,7 @@
 - Streaming results through a channel, one `WalkResult` per directory
 - Per-directory error reporting that doesn't abort unrelated work
 - Skip entries by name (prunes matching directories), optional max depth, optional symlink following
-- Optional atomic traversal statistics
+- Zero-overhead core walker (metrics and counts computed directly in the consumer loop with zero atomics)
 - Benchmark suite vs Rust's parallel `ignore::WalkParallel`, with a synthetic tree generator across wide/deep/mixed shapes — see [Benchmarks](#benchmarks)
 
 ## Installation
@@ -82,12 +82,12 @@ func main() {
 func NewWalkman(followLinks bool, maxDepth uint32, skipList []string) *Walkman
 ```
 
-Defaults: `PoolSize = GOMAXPROCS`, `InitialWorkerCap = 32`, `ResultBuffSize = 64`, stats disabled.
+Defaults: `PoolSize = GOMAXPROCS`, `InitialWorkerCap = 32`, `ResultBuffSize = 64`.
 
 ### `NewWalkmanWithConfig`
 
 ```go
-func NewWalkmanWithConfig(followLinks bool, maxDepth uint32, skipList []string, trackStats bool, pc PoolConfig) *Walkman
+func NewWalkmanWithConfig(followLinks bool, maxDepth uint32, skipList []string, pc PoolConfig) *Walkman
 
 type PoolConfig struct {
     PoolSize         int // number of workers
@@ -122,14 +122,6 @@ func (w *Walkman) Wait() error
 ```
 
 Blocks until the pool finishes; returns the first fatal pool-level error.
-
-### `Stats`
-
-```go
-func (w *Walkman) Stats() (files, dirs, links, skipped, maxDepthReached uint32)
-```
-
-Point-in-time snapshot (atomic, since tasks run concurrently). Zero unless `trackStats` is enabled.
 
 ## Traversal semantics
 
@@ -259,7 +251,7 @@ go test -race ./...        # race detector
 go test -bench=. -benchmem ./...
 ```
 
-Covers empty/flat directories, equivalence with `filepath.WalkDir`, skip-list pruning, max-depth, symlinks (following, broken links), permission errors, stats accuracy, consistency across worker counts, and worker parking/wake/termination behavior.
+Covers empty/flat directories, equivalence with `filepath.WalkDir`, skip-list pruning, max-depth, symlinks (following, broken links), permission errors, counts accuracy, consistency across worker counts, and worker parking/wake/termination behavior.
 
 ## Limitations / roadmap
 
