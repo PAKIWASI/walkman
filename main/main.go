@@ -1,4 +1,4 @@
-// walkman-bench: a CLI wrapper around the walkman package built to be
+// walkman-cli: a CLI wrapper around the walkman package built to be
 // directly comparable to walkdir-cli (the Rust `walkdir` wrapper). Same
 // flags, same semantics, same output shape, so timing numbers between the
 // two binaries are actually measuring the same thing.
@@ -60,6 +60,7 @@ func main() {
 	runOnce := func() (files, dirs, links, errs uint32, elapsed time.Duration) {
 		w := walkman.NewWalkmanWithConfig(*followLinks, uint32(*maxDepth), skip, true, pc)
 		start := time.Now()
+
 		for r := range w.Walk(root) {
 			if n := len(r.Errs); n != 0 {
 				errs += uint32(n)
@@ -98,8 +99,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "walk failed: %v\n", err)
 			os.Exit(1)
 		}
-		f, d, l, _, _ := w.Stats()
-		files, dirs, links = f, d, l
+		files, dirs, links = w.Stats()
 		return
 	}
 

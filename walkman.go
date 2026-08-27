@@ -21,19 +21,16 @@ var (
 )
 
 type walkConf struct {
-	followLinks bool   // off by default
-	trackStats  bool   // off by default: every stat is an atomic.Add
+	followLinks bool // off by default
+	trackStats  bool
 	maxDepth    uint32 // 0 means unlimited
 	skipSet     map[string]struct{}
 }
 
-// walkStats is written concurrently from every worker's Task invocation when trackStats is enabled
 type walkStats struct {
-	files           atomic.Uint32
-	dirs            atomic.Uint32
-	links           atomic.Uint32
-	skipped         atomic.Uint32
-	maxDepthReached atomic.Uint32
+	files atomic.Uint32
+	dirs  atomic.Uint32
+	links atomic.Uint32
 }
 
 // DirErr is one error encountered while producing a WalkResult.
@@ -84,6 +81,9 @@ type dirKey struct {
 // until containsTarget actually needs to compare it against a resolved symlink
 // target, and even then only ancestors on the path back to root pay it
 // TODO: back this by an arena or a slice and not heap allocate each one?
+// TODO: why does ancestorNode have a path? it's already part of walkItem
+// maybe we should make walkItem a pointer type then we can get rid of ancestorNode
+// and just have a direct pointer to the parent walkItem
 type ancestorNode struct {
 	path   string
 	parent *ancestorNode
@@ -177,8 +177,8 @@ func NewWalkmanWithConfig(
 		conf: walkConf{
 			followLinks: followLinks,
 			maxDepth:    maxDepth,
-			skipSet:     skipSet,
 			trackStats:  trackStats,
+			skipSet:     skipSet,
 		},
 	}
 
@@ -265,12 +265,11 @@ func (w *Walkman) visit(
 	if len(w.conf.skipSet) != 0 && before != 0 {
 		dirs = filterSkipped(dirs, w.conf.skipSet)
 	}
-	skippedCount := uint32(before - len(dirs))
 
 	// Local, non-atomic counters accumulated across every entry in this
 	// directory; the atomics (one per counter, not per entry) only get
 	// touched once, after the loop, and only if trackStats is on at all.
-	var filesCount, dirsCount, linksCount, maxDepthCount uint32
+	var fileCount, dirCount, linkCount uint32
 
 	for i := range dirs {
 		entry := dirs[i]
@@ -281,19 +280,17 @@ func (w *Walkman) visit(
 
 		// this Task never follows symlinks
 		if isSymlink {
-			linksCount++
+			linkCount++
 			continue
 		}
 
 		if !isDir {
-			filesCount++
+			fileCount++
 			continue
 		}
-
-		dirsCount++
+		dirCount++
 
 		if w.conf.maxDepth != 0 && item.depth+1 > w.conf.maxDepth {
-			maxDepthCount++
 			continue
 		}
 
@@ -304,22 +301,15 @@ func (w *Walkman) visit(
 	}
 
 	if w.conf.trackStats {
-		// Zero-valued counters still cost an atomic fence for nothing, so
-		// only touch the ones that actually moved this directory.
-		if skippedCount != 0 {
-			w.stats.skipped.Add(skippedCount)
+		// atomic additions cost isn't irrelevent
+		if fileCount != 0 {
+			w.stats.files.Add(fileCount)
 		}
-		if filesCount != 0 {
-			w.stats.files.Add(filesCount)
+		if dirCount != 0 {
+			w.stats.dirs.Add(dirCount)
 		}
-		if dirsCount != 0 {
-			w.stats.dirs.Add(dirsCount)
-		}
-		if linksCount != 0 {
-			w.stats.links.Add(linksCount)
-		}
-		if maxDepthCount != 0 {
-			w.stats.maxDepthReached.Add(maxDepthCount)
+		if linkCount != 0 {
+			w.stats.links.Add(linkCount)
 		}
 	}
 
@@ -347,12 +337,11 @@ func (w *Walkman) visitSym(
 	if len(w.conf.skipSet) != 0 && before != 0 {
 		dirs = filterSkipped(dirs, w.conf.skipSet)
 	}
-	skippedCount := uint32(before - len(dirs))
 
 	// Local, non-atomic counters accumulated across every entry in this
 	// directory; the atomics (one per counter, not per entry) only get
 	// touched once, after the loop, and only if trackStats is on at all.
-	var filesCount, dirsCount, maxDepthCount uint32
+	var fileCount, dirCount uint32
 
 	// Err field is nil until the first problem, which is the common case
 	result := WalkResult{Dir: item.path, Entries: dirs}
@@ -383,7 +372,7 @@ func (w *Walkman) visitSym(
 			if !info.IsDir() {
 				// Resolves to a non-directory (file, device, etc)
 				// count it as a file
-				filesCount++
+				fileCount++
 				continue
 			}
 			st, ok := info.Sys().(*syscall.Stat_t)
@@ -414,14 +403,12 @@ func (w *Walkman) visitSym(
 		}
 
 		if !isDir {
-			filesCount++
+			fileCount++
 			continue
 		}
-
-		dirsCount++
+		dirCount++
 
 		if w.conf.maxDepth != 0 && item.depth+1 > w.conf.maxDepth {
-			maxDepthCount++
 			continue
 		}
 
@@ -439,21 +426,11 @@ func (w *Walkman) visitSym(
 	}
 
 	if w.conf.trackStats {
-		// Zero-valued counters still cost an atomic fence for nothing, so
-		// only touch the ones that actually moved this directory.
-		if skippedCount != 0 {
-			w.stats.skipped.Add(skippedCount)
+		if fileCount != 0 {
+			w.stats.files.Add(fileCount)
 		}
-		if filesCount != 0 {
-			w.stats.files.Add(filesCount)
-		}
-		if dirsCount != 0 {
-			w.stats.dirs.Add(dirsCount)
-		}
-		// links deliberately not touched here. The links stat stays meaningful only for the
-		// non-follow path (visit, above), where a symlink is never resolved or descended into.
-		if maxDepthCount != 0 {
-			w.stats.maxDepthReached.Add(maxDepthCount)
+		if dirCount != 0 {
+			w.stats.dirs.Add(dirCount)
 		}
 	}
 
@@ -489,13 +466,8 @@ func (w *Walkman) Wait() error {
 	return w.pool.Wait()
 }
 
-// Stats returns a point-in-time snapshot of walk statistics. Always zero
-// unless trackStats was enabled via NewWalkmanWithConfig. Safe to call
-// while a walk is in progress, though the numbers will still be moving.
-func (w *Walkman) Stats() (files, dirs, links, skipped, maxDepthReached uint32) {
+func (w *Walkman) Stats() (files, dirs, links uint32) {
 	return w.stats.files.Load(),
 		w.stats.dirs.Load(),
-		w.stats.links.Load(),
-		w.stats.skipped.Load(),
-		w.stats.maxDepthReached.Load()
+		w.stats.links.Load()
 }

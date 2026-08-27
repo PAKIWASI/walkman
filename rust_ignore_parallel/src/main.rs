@@ -15,7 +15,7 @@
 // filtering), so every one of those filters is explicitly turned off below
 // — this walks the raw filesystem tree, same as walkdir-cli and walkman.
 //
-// Mirrors walkdir-cli / walkman semantics:
+// Mirrors walkman semantics:
 //   - skip list: entries whose *name* matches are pruned (subtree skipped
 //     for dirs, via WalkState::Skip from the visitor)
 //   - max-depth: 0 = unlimited, like walkdir-cli's/walkman's
@@ -180,9 +180,7 @@ impl ParallelVisitor for Visitor {
             }
         };
 
-        // depth 0 is the root itself — excluded from counts, matching
-        // walkdir-cli's min_depth(1) and walkman's "root is never found,
-        // only its children are" semantics.
+        // depth 0 is the root itself — excluded from counts
         if entry.depth() == 0 {
             return WalkState::Continue;
         }
@@ -281,8 +279,7 @@ fn run_walk(opts: &Opts) -> Counts {
 
 // Rust ignores SIGPIPE by default, which turns "closed the read end early"
 // (e.g. `ignore-parallel-cli / | head`) into an ugly panic instead of a
-// quiet exit, like every other Unix CLI. Restore the default disposition
-// on startup — same fix as rust_walkdir's walkdir-cli.
+// quiet exit, like every other Unix CLI. Restore the default disposition on startup
 #[cfg(unix)]
 fn restore_sigpipe() {
     unsafe {
