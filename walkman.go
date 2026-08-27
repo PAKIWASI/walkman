@@ -1,4 +1,5 @@
-// Package walkman
+// Package walkman implements a concurrent directory walker.
+// It gives iterative control of each entry to the user via a channel
 package walkman
 
 import (

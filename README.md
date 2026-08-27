@@ -142,6 +142,8 @@ Each task is intentionally small:
 type walkItem struct {
     path  string
     depth uint32
+    // only used when --follow-links is enabled
+    parent *ancestor
 }
 ```
 
