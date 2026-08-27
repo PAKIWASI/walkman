@@ -56,7 +56,7 @@ type walkItem struct {
 }
 
 type ancestorNode struct {
-	path string
+	path   string
 	parent *ancestorNode
 }
 
@@ -164,7 +164,6 @@ func readDir(name string) ([]fs.DirEntry, error) {
 		return nil, err
 	}
 	defer f.Close()
-
 	return f.ReadDir(-1)
 }
 
@@ -273,7 +272,6 @@ func (w *Walkman) visitSym(
 	// Err field is nil until the first problem, which is the common case
 	result := WalkResult{Dir: item.path, Entries: dirs}
 
-
 	// We do a syscall for dirkey only once per directory.
 	// The rest of the symlinks just reuse those dirkey values
 	var (
@@ -322,7 +320,7 @@ func (w *Walkman) visitSym(
 
 			if !info.IsDir() {
 				// Resolves to a non-directory (file, device, etc)
-				// BUG: when symlink is a non-dir, we should resolve and report that file
+				// when symlink is a non-dir, we should resolve and report that file
 				dirs[i] = fs.FileInfoToDirEntry(info)
 				continue
 			}
