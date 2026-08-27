@@ -61,24 +61,6 @@ type dirKey struct {
 	dev, ino uint64
 }
 
-// containsTarget walks the parent chain from item up to root,
-// Lstat'ing each one fresh and comparing it against k. Returns true (a
-// cycle) at the first match. Only called once per followed symlink.
-//
-// A failed Lstat on an ancestor (raced away, permissions) just means that
-// ancestor is skipped rather than erroring the whole walk.
-func (item *walkItem) containsTarget(k dirKey) bool {
-	for n := item; n != nil; n = n.parent {
-		nk, err := statKey(n.path)
-		if err != nil {
-			continue
-		}
-		if nk == k {
-			return true
-		}
-	}
-	return false
-}
 
 // statKey Lstat's path and returns its dirKey. Only called when followLinks is on,
 // and only against a resolved symlink target and the ancestors being checked against it.
@@ -287,6 +269,34 @@ func (w *Walkman) visitSym(
 	// Err field is nil until the first problem, which is the common case
 	result := WalkResult{Dir: item.path, Entries: dirs}
 
+	// We do a syscall for dirkey only once per directory.
+	// The rest of the symlinks just reuse those dirkey values
+	var (
+		localBuf          [32]dirKey
+		ancestorKeys      []dirKey
+		ancestorsResolved bool
+	)
+
+	hasCycle := func(k dirKey) bool {
+		if !ancestorsResolved {
+			ancestorsResolved = true
+			ancestorKeys = localBuf[:0]
+			for n := &item; n != nil; n = n.parent {
+				nk, err := statKey(n.path)
+				if err != nil {
+					continue
+				}
+				ancestorKeys = append(ancestorKeys, nk)
+			}
+		}
+		for _, ak := range ancestorKeys {
+			if ak == k {
+				return true
+			}
+		}
+		return false
+	}
+
 	for i := range dirs {
 		entry := dirs[i]
 
@@ -317,7 +327,7 @@ func (w *Walkman) visitSym(
 
 			// Cycle detected: record it against this one entry and skip
 			// descending into it, but keep processing the rest of dirs.
-			if item.containsTarget(k) {
+			if hasCycle(k) {
 				result.Errs = append(result.Errs, DirErr{Name: entry.Name(), Err: errSymlinkCycle})
 				continue
 			}
