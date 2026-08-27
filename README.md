@@ -58,11 +58,10 @@ func main() {
     )
 
     for result := range w.Walk(".") {
-        if result.Err != nil {
-            log.Printf("%s: %v", result.Dir, result.Err)
-            continue
+        for _, e := range result.Errs {
+            log.Printf("%s: %s: %v", result.Dir, e.Name, e.Err)
         }
-        for _, entry := range result.Ret {
+        for _, entry := range result.Entries {
             fmt.Printf("%s/%s\n", result.Dir, entry.Name())
         }
     }
@@ -73,7 +72,7 @@ func main() {
 }
 ```
 
-> **Drain before you wait.** `Walk`'s channel stays open until all queued work completes — consume it fully, then call `Wait()` for the terminal pool error. A per-directory error lives inside its `WalkResult` and doesn't abort the rest of the traversal.
+> **Drain before you wait.** `Walk`'s channel stays open until all queued work completes — consume it fully, then call `Wait()` for the terminal pool error. Per-entry errors live inside `WalkResult.Errs` and don't abort the rest of the traversal — a directory can list successfully (`Entries` populated) while individual entries inside it (a dangling symlink, a detected cycle) still show up as their own `DirErr`.
 
 ## API
 
@@ -103,13 +102,18 @@ type PoolConfig struct {
 func (w *Walkman) Walk(root string) <-chan WalkResult
 
 type WalkResult struct {
-    Dir string
-    Ret []fs.DirEntry // this directory's direct entries
-    Err error
+    Dir     string
+    Entries []fs.DirEntry // this directory's direct entries
+    Errs    []DirErr      // zero or more per-entry problems from this directory
+}
+
+type DirErr struct {
+    Name string // the entry that caused the error
+    Err  error
 }
 ```
 
-Child directories are scheduled as separate tasks, not included in `Ret`.
+Child directories are scheduled as separate tasks, not included in `Entries`. `Entries` and `Errs` aren't mutually exclusive: a directory can list successfully while individual entries inside it (a dangling symlink, a detected cycle) are reported as their own `DirErr` alongside the otherwise-complete `Entries`. `Entries` is nil only when the directory itself couldn't be opened at all, in which case `Errs` holds exactly that one failure.
 
 ### `Wait`
 
@@ -132,10 +136,10 @@ Point-in-time snapshot (atomic, since tasks run concurrently). Zero unless `trac
 | Aspect | Behavior |
 | --- | --- |
 | **Ordering** | Completion-ordered, not path-sorted. Layer sorting/BFS on top of the stream if you need it. |
-| **Skip list** | Matches entry names at every depth (e.g. `.git`, `node_modules`); a match prunes the whole subtree. |
+| **Skip list** | Matches entry names at every depth (e.g. `.git`, `node_modules`), a match prunes the whole subtree. |
 | **Max depth** | `0` = unlimited; otherwise the walker won't descend past that depth. |
-| **Symlinks** | Not followed by default. When enabled, resolves via `os.Stat` and descends if the target is a directory. **No cycle detection yet.** |
-| **Errors** | A directory that fails to open reports its error in its own `WalkResult`; other workers keep going. |
+| **Symlinks** | Not followed by default. When enabled, resolves via `os.Stat` and descends if the target is a directory. A detected cycle is reported as a `DirErr` (`errSymlinkCycle`) on the offending entry. |
+| **Errors** | A directory that fails to open reports its error as the sole `DirErr` in its own `WalkResult`, other workers keep going. |
 
 ## How it works
 
@@ -148,16 +152,15 @@ type walkItem struct {
 }
 ```
 
-For every directory: open it, read entries with `File.ReadDir(-1)` (skips the sort `os.ReadDir` does), drop skipped names, classify entries, optionally resolve symlinks, emit a `WalkResult`, and push child directories back onto the pool. Stats stay off by default to avoid atomic-counter overhead on the common path.
+For every directory: open it, read entries with `File.ReadDir(-1)`, drop skipped names, classify entries, optionally resolve symlinks, emit a `WalkResult`, and push child directories back onto the pool.
 
 The pool itself lives in [`github.com/PAKIWASI/workstealpool`](https://github.com/PAKIWASI/workstealpool).
 
 ## CLI tools
 
-A Go CLI (`main/`) and two Rust reference CLIs share matching options for comparison:
+A Go CLI (`main/`) and a Rust reference CLI share matching options for comparison:
 
-- `rust_walkdir/`, wrapping the [`walkdir`](https://crates.io/crates/walkdir) crate — sequential, single-threaded baseline.
-- `rust_ignore_parallel/`, wrapping the [`ignore`](https://crates.io/crates/ignore) crate's `WalkBuilder::build_parallel()` (the walker ripgrep itself uses) — a multi-threaded walker, so it's the more relevant comparison for `walkman` than the sequential one is. All of `ignore`'s ripgrep-style filtering (`.gitignore`, hidden files, git excludes) is explicitly disabled so it walks the raw tree, same as `walkdir-cli` and `walkman`.
+- `rust_ignore_parallel/`, wrapping the [`ignore`](https://crates.io/crates/ignore) crate's `WalkBuilder::build_parallel()` (the walker ripgrep uses): a multi-threaded walker, and the relevant comparison for `walkman` since both are concurrent. All of `ignore`'s ripgrep-style filtering (`.gitignore`, hidden files, git excludes) is explicitly disabled so it walks the raw tree, same as `walkman`.
 
 ```bash
 go build -o build/main ./main
@@ -175,48 +178,56 @@ go build -o build/main ./main
 ```
 
 ```bash
-cd rust_walkdir && cargo build --release            # produces build/walkdir-cli
 cd rust_ignore_parallel && cargo build --release    # produces build/ignore-parallel-cli
 ```
 
-`ignore-parallel-cli` takes the same flags as `walkdir-cli` plus `--workers N` (thread count, `0` = `available_parallelism`), matching `walkman`'s flag so it sweeps the same way in `bench_harness.sh`.
+`ignore-parallel-cli` takes `--workers N` (thread count, `0` = `available_parallelism`), matching `walkman`'s flag so it sweeps the same way in `bench_harness.sh`.
 
 
 ## Benchmarks
 
-`walkman` (Go) vs Rust's parallel `ignore::WalkParallel` (the ripgrep walker), across three synthetic tree shapes, Intel i5-1135G7. Rust's *sequential* `walkdir` crate was dropped from the ongoing suite after early runs — walkman beat it decisively and consistently every time, which stopped being an interesting result to keep re-measuring once a real parallel competitor was in the mix.
+`walkman` (Go) vs Rust's parallel `ignore::WalkParallel` (the ripgrep walker), across three synthetic tree shapes, Intel i5-1135G7 (4C/8T). Rust's *sequential* `walkdir` crate isn't in the repo anymore — walkman beat it decisively and consistently in every early run, which stopped being interesting once `ignore::WalkParallel` was in the mix as the real competitor.
 
 | Shape | Dirs | Files | What it stresses |
 | --- | ---: | ---: | --- |
 | `wide` | 1,884 | 11,304 | shallow, high branching — lots of independent, stealable work |
+| `deep` | 16,382 | 32,764 | deep, low branching — long dependency chains, little to steal |
 | `mixed` | 19,530 | 78,120 | moderate depth/branching — closer to a real source tree |
-| `deep` | 524,286 | 1,048,572 | deep, low branching — long dependency chains, little to steal |
 
-**Wall-clock mean, ms (`hyperfine`, full process per run, `--min-runs 15 --warmup 5`):**
+There's also a symlink-focused sweep (`run_all_sym.sh`) that builds the same three shapes with 200 symlinks scattered in (including deliberate cycles) and benchmarks both CLIs with `--follow-links` on, to exercise the cycle-detection path rather than just the plain walk.
 
-| Workers | `wide` walkman | `wide` ignore | `mixed` walkman | `mixed` ignore | `deep` walkman | `deep` ignore |
+**Wall-clock mean, ms (`hyperfine`, full process per run, `--min-runs 10 --warmup 5`):**
+
+*No symlinks:*
+
+| Workers | `wide` walkman | `wide` ignore | `deep` walkman | `deep` ignore | `mixed` walkman | `mixed` ignore |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 12.5 | 20.7 | 112.0 | 104.9 | 2,869 | 2,184 |
-| 2 | 7.2 | 13.9 | 67.6 | 57.2 | 1,709 | 1,138 |
-| 4 | **5.1** | 9.6 | 41.3 | **29.2** | 1,039 | 625 |
-| 8 | 7.9 | 9.2 | 32.8 | **28.1** | 829 | **461** |
+| 1 | **15.0** | 22.4 | 88.9 | **81.4** | 114.0 | **103.6** |
+| 4 | **5.9** | 9.9 | 31.7 | **24.3** | 41.4 | **29.3** |
+| 8 | **8.6** | 9.4 | **24.7** | 27.2 | 31.6 | **27.5** |
+
+*With `--follow-links` (200 symlinks/tree, cycles included):*
+
+| Workers | `wide` walkman | `wide` ignore | `deep` walkman | `deep` ignore | `mixed` walkman | `mixed` ignore |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | **19.6** | 22.0 | 106.9 | **88.0** | 139.6 | **109.3** |
+| 4 | **7.8** | 12.6 | 38.5 | **25.1** | 45.6 | **31.4** |
+| 8 | **10.6** | 11.1 | **29.4** | 23.3 | 34.2 | **27.6** |
 
 Takeaways:
-- **`wide`** — walkman wins outright at every worker count (best: 5.1ms at 4 workers vs 9.2ms for `ignore` at its best). Both regress past 4 workers here; the tree is too small to amortize more worker-pool overhead.
-- **`mixed`** — walkman is ahead at 1 worker, `ignore` pulls ahead and stays ahead from 4 workers on.
-- **`deep`** — `ignore` wins at every worker count, and the gap widens with more workers (461ms vs 829ms at 8).
+- **`wide`** — walkman wins outright at every worker count, symlinks or not.
+- **`deep`/`mixed`** — `ignore` is ahead at 1–4 workers; on `deep` walkman catches up and wins by 8 workers, on `mixed` `ignore` stays ahead throughout.
+- **Known anomaly:** on `wide` with symlinks, walkman gets *slower* going from 4→8 workers (7.8ms → 10.6ms), reproduced across two independent runs with tight variance (not noise). No such regression on the no-symlinks `wide` sweep. Likely contention in the cycle-detection path under 8-way concurrency on a shallow tree; not yet root-caused.
 
-**Allocation pressure (`perf stat`, workers=1, mean of 15 runs):**
+**Allocation pressure (`perf stat`, workers=1, mean of 10 runs, no symlinks):**
 
 | Shape | walkman page-faults | ignore page-faults | walkman cache-misses | ignore cache-misses |
 | --- | ---: | ---: | ---: | ---: |
-| `wide` | 162 | 106 | 22.3K | 5.9K |
-| `mixed` | 483 | 107 | 88.6K | 14.8K |
-| `deep` | 4,481 | 108 | 1.23M | 262.7K |
+| `wide` | 169 | 111 | 248K | 126K |
+| `deep` | 401 | 111 | 671K | 452K |
+| `mixed` | 491 | 112 | 1.04M | 776K |
 
-walkman faults and cache-misses noticeably more than `ignore` everywhere, and the gap grows with tree size (~40x more page-faults on `deep`). This is the likely explanation for why `ignore` pulls further ahead as trees get deeper: whatever allocation `walkman` does per directory doesn't stay flat.
-
-> **Data-quality note:** `test/perf_bench.sh` had a regex bug where `task-clock` values ≥1000ms lost their leading digit(s) to perf's thousands-separator formatting (e.g. `2,924.90` parsed as `924.90`) — this only affected the `task_clock_ms` column on the `deep` shape and is now fixed, but the `deep` CPU-time-from-perf numbers in `test/bench_results/perf_deep.csv` predate the fix and can't be recovered after the fact (the lost digits aren't in the file). `context-switches` and `cpu-migrations` also read as a literal `0` across every single run in this environment, including 8-worker runs — almost certainly a sandbox/container restriction on those specific counters rather than genuine zero contention, so those two columns aren't trustworthy either. Wall-clock (`hyperfine`), page-faults, cache-misses, cycles, and instructions are unaffected by both issues. Re-run `test/run_all.sh` to get clean `deep` CPU-time numbers.
+walkman faults and cache-misses more than `ignore` at every shape, and the gap widens with tree size. Likely explanation for `ignore` pulling ahead as trees get deeper/wider: whatever allocation `walkman` does per directory doesn't stay flat.
 
 Reproduce with:
 
@@ -225,12 +236,20 @@ cd test
 ./run_all.sh \
   --walkman          ../build/main \
   --ignore-parallel  ../build/ignore-parallel-cli \
-  --workers          "1,2,4,$(nproc)" \
-  --runs             15 \
+  --workers          "1,4,$(nproc)" \
+  --runs             10 \
   --out-dir          bench_results
+
+./run_all_sym.sh \
+  --walkman          ../build/main \
+  --ignore-parallel  ../build/ignore-parallel-cli \
+  --workers          "1,4,$(nproc)" \
+  --runs             10 \
+  --links            200 \
+  --out-dir          bench_results_symlinks
 ```
 
-Or run one shape/harness at a time with `build_tree.sh` + `bench_harness.sh` (hyperfine) / `perf_bench.sh` (perf counters) — see each script's `--help`.
+Or run one shape/harness at a time with `build_tree.sh` + `bench_harness.sh` (hyperfine) / `perf_bench.sh` (perf counters). See each script's `--help`.
 
 ## Testing
 
@@ -249,7 +268,6 @@ Deliberately deferred so far:
 - Deterministic/sorted or breadth-first output
 - `iter.Seq`-based iteration, `FilterEntry`-style filtering, `ContentsFirst` ordering
 - A cap on simultaneously open directories
-- Global symlink-cycle detection
 - `fs.FS`-based traversal
 
 Ordering/scheduling policy is kept out of the core walker on purpose: sorted or BFS output needs buffering, which belongs above the streaming core, not inside it.
@@ -261,17 +279,18 @@ walkman/
 ├── walkman.go                      # core concurrent walker
 ├── walkman_test.go                 # correctness + concurrency tests
 ├── walkman_bench_test.go           # benchmark suite
-├── walkman_worker_sweep_test.go    # WorkerSweep benchmark
+├── walkman_worker_sweep_test.go    # WorkerSweep benchmark (benchstat-friendly)
 ├── main/main.go                    # Go CLI / benchmark wrapper
-├── rust_walkdir/src/main.rs        # comparable Rust walkdir wrapper (sequential)
 ├── rust_ignore_parallel/src/main.rs # comparable Rust ignore::WalkParallel wrapper
-├── build/                          # built binaries (main, walkdir-cli, ignore-parallel-cli)
+├── build/                          # built binaries (main, ignore-parallel-cli)
 ├── test/
 │   ├── build_tree.sh               # synthetic tree generator (wide/deep/mixed)
 │   ├── bench_harness.sh            # hyperfine wall-clock sweep
 │   ├── perf_bench.sh               # perf-counter sweep
 │   ├── run_all.sh                  # runs both harnesses across all three shapes
-│   └── bench_results/              # recorded CSVs + run_manifest.txt
+│   ├── run_all_sym.sh              # symlink-focused counterpart (--follow-links, cycles)
+│   ├── bench_results/              # recorded CSVs + run_manifest.txt (no symlinks)
+│   └── bench_results_symlinks/     # recorded CSVs + run_manifest.txt (--follow-links)
 └── Roadmap.md                      # feature roadmap / implementation notes
 ```
 
