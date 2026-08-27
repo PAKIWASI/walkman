@@ -47,14 +47,12 @@ type WalkResult struct {
 	Errs    []DirErr
 }
 
-// walkItem is the actual work-stealing pool item. ancestors is only ever
-// non-nil when followLinks is on (visitSym populates it; visit ignores it
-// and always spawns with it left at its zero value), so plain walks pay
-// only for the width of one extra pointer field
+// walkItem is the actual work-stealing pool item. parent is only non-nil
+// when followLinks is on, so plain walks pay zero heap allocation overhead.
 type walkItem struct {
-	depth     uint32
-	path      string
-	ancestors *ancestorNode
+	depth  uint32
+	path   string
+	parent *walkItem
 }
 
 // dirKey identifies a directory by device+inode, stable across the
@@ -63,32 +61,14 @@ type dirKey struct {
 	dev, ino uint64
 }
 
-// ancestorNode is a chain of every directory above the current walkItem in
-// the walk's current path, root-to-here. Only built/consulted when
-// followLinks is on; nil (and untouched) otherwise.
-//
-// A node stores just the path, not a pre-resolved dirKey: pushing a plain directory
-// onto the chain (the common case, on trees with few or no symlinks) costs nothing
-// beyond the pointer write. The cost of identifying a directory (an Lstat) is deferred
-// until containsTarget actually needs to compare it against a resolved symlink
-// target, and even then only ancestors on the path back to root pay it
-// TODO: back this by an arena or a slice and not heap allocate each one?
-// TODO: why does ancestorNode have a path? it's already part of walkItem
-// maybe we should make walkItem a pointer type then we can get rid of ancestorNode
-// and just have a direct pointer to the parent walkItem
-type ancestorNode struct {
-	path   string
-	parent *ancestorNode
-}
-
-// containsTarget walks the chain from the nearest ancestor up to root,
+// containsTarget walks the parent chain from item up to root,
 // Lstat'ing each one fresh and comparing it against k. Returns true (a
-// cycle) at the first match. Only called once per followed symlink
+// cycle) at the first match. Only called once per followed symlink.
 //
 // A failed Lstat on an ancestor (raced away, permissions) just means that
-// ancestor is skipped rather than erroring the whole walk
-func (a *ancestorNode) containsTarget(k dirKey) bool {
-	for n := a; n != nil; n = n.parent {
+// ancestor is skipped rather than erroring the whole walk.
+func (item *walkItem) containsTarget(k dirKey) bool {
+	for n := item; n != nil; n = n.parent {
 		nk, err := statKey(n.path)
 		if err != nil {
 			continue
@@ -101,7 +81,7 @@ func (a *ancestorNode) containsTarget(k dirKey) bool {
 }
 
 // statKey Lstat's path and returns its dirKey. Only called when followLinks is on,
-// and only against a resolved symlink target and the ancestors being checked against it
+// and only against a resolved symlink target and the ancestors being checked against it.
 func statKey(path string) (dirKey, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -285,8 +265,8 @@ func (w *Walkman) visit(
 // visitSym is visit's counterpart for followLinks: same item type, same
 // pool, only used when the Walkman was built with followLinks on.
 // It additionally resolves symlinked directories and walks into them,
-// guarding against cycles via item.ancestors, the chain
-// of dirKeys (dev+ino) for every directory from root down to here,
+// guarding against cycles via item.parent, the chain
+// of directories from root down to here,
 // regardless of whether each hop was a plain directory or a followed symlink.
 func (w *Walkman) visitSym(
 	_ context.Context,
@@ -311,7 +291,6 @@ func (w *Walkman) visitSym(
 		entry := dirs[i]
 
 		childPath := join(item.path, entry.Name())
-		childAncestors := item.ancestors
 
 		mode := entry.Type()
 		isDir := mode.IsDir()
@@ -338,7 +317,7 @@ func (w *Walkman) visitSym(
 
 			// Cycle detected: record it against this one entry and skip
 			// descending into it, but keep processing the rest of dirs.
-			if item.ancestors.containsTarget(k) {
+			if item.containsTarget(k) {
 				result.Errs = append(result.Errs, DirErr{Name: entry.Name(), Err: errSymlinkCycle})
 				continue
 			}
@@ -346,7 +325,6 @@ func (w *Walkman) visitSym(
 			// A symlink-to-directory entry never has fs.ModeDir set on its
 			// own DirEntry. Force isDir now that we've resolved it.
 			isDir = true
-			childAncestors = &ancestorNode{path: childPath, parent: item.ancestors}
 		}
 
 		if !isDir {
@@ -357,16 +335,10 @@ func (w *Walkman) visitSym(
 			continue
 		}
 
-		if !isSymlink {
-			// Extend the chain with this plain directory's own path too, so
-			// a symlink further down that points back to it is still caught
-			childAncestors = &ancestorNode{path: childPath, parent: item.ancestors}
-		}
-
 		spawn(walkItem{
-			path:      childPath,
-			depth:     item.depth + 1,
-			ancestors: childAncestors,
+			path:   childPath,
+			depth:  item.depth + 1,
+			parent: &item,
 		})
 	}
 
@@ -383,15 +355,7 @@ func (w *Walkman) Walk(root string) <-chan WalkResult {
 	// without re-running filepath.Clean per entry.
 	root = filepath.Clean(root)
 
-	item := walkItem{path: root, depth: 0}
-
-	// Seed the ancestor chain with the root's own path so a symlink
-	// anywhere in the tree that points straight back to root is still caught
-	if w.conf.followLinks {
-		item.ancestors = &ancestorNode{path: root}
-	}
-
-	w.pool.Submit(item)
+	w.pool.Submit(walkItem{path: root, depth: 0})
 	return w.pool.Run()
 }
 

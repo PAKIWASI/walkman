@@ -253,13 +253,11 @@ func BenchmarkWalk_Synthetic_PoolSize(b *testing.B) {
 	}
 }
 
-// TestWalkItemSize documents the actual, measured cost of adding the
-// ancestors field to walkItem for both modes, rather than an eyeballed
-// claim. It's a test (always run, always visible), not a benchmark, since
-// unsafe.Sizeof is a compile-time constant — there's nothing to time.
+// TestWalkItemSize documents the size of walkItem (including the parent pointer
+// used when followLinks is on). It's a test (always run, always visible), not a
+// benchmark, since unsafe.Sizeof is a compile-time constant.
 func TestWalkItemSize(t *testing.T) {
 	t.Logf("unsafe.Sizeof(walkItem{}) = %d bytes", unsafe.Sizeof(walkItem{}))
-	t.Logf("unsafe.Sizeof(ancestorNode{}) = %d bytes (never allocated unless followLinks is on)", unsafe.Sizeof(ancestorNode{}))
 }
 
 // buildSymlinkTree builds buildSyntheticTree's shape, then adds one
