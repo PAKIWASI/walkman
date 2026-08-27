@@ -243,8 +243,7 @@ fn run_walk(opts: &Opts) -> Counts {
     builder
         // Disable every ripgrep-style filter individually (rather than
         // relying on a single "standard_filters" toggle) so this stays
-        // correct across `ignore` versions: we want the raw tree, exactly
-        // like walkdir-cli and walkman see it.
+        // correct across `ignore` versions: we want the raw tree
         .hidden(false)
         .parents(false)
         .ignore(false)

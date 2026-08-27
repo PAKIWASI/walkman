@@ -273,6 +273,7 @@ func (w *Walkman) visitSym(
 	// Err field is nil until the first problem, which is the common case
 	result := WalkResult{Dir: item.path, Entries: dirs}
 
+
 	// We do a syscall for dirkey only once per directory.
 	// The rest of the symlinks just reuse those dirkey values
 	var (
@@ -321,6 +322,8 @@ func (w *Walkman) visitSym(
 
 			if !info.IsDir() {
 				// Resolves to a non-directory (file, device, etc)
+				// BUG: when symlink is a non-dir, we should resolve and report that file
+				dirs[i] = fs.FileInfoToDirEntry(info)
 				continue
 			}
 			st, ok := info.Sys().(*syscall.Stat_t)
@@ -351,8 +354,8 @@ func (w *Walkman) visitSym(
 
 		spawn(walkItem{
 			path:   childPath,
-			depth:  item.depth + 1,
 			parent: item.parent,
+			depth:  item.depth + 1,
 		})
 	}
 

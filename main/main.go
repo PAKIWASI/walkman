@@ -50,17 +50,15 @@ func main() {
 		pc.PoolSize = *workers
 	}
 
-	needPrint := *print
-	needCounts := !*quiet || *bench == 0 || needPrint
-
 	runOnce := func() (files, dirs, links, errs uint32, elapsed time.Duration) {
 		w := walkman.NewWalkmanWithConfig(*followLinks, uint32(*maxDepth), skip, pc)
 		start := time.Now()
 
 		for r := range w.Walk(root) {
+
 			if n := len(r.Errs); n != 0 {
 				errs += uint32(n)
-				if needPrint {
+				if *print {
 					for _, ie := range r.Errs {
 						fmt.Fprintf(os.Stderr, "error: %s %v\n", ie.Name, ie.Err)
 					}
@@ -71,34 +69,22 @@ func main() {
 				continue
 			}
 
-			if needPrint {
-				for _, e := range r.Entries {
-					t := e.Type()
-					kind := "f"
-					switch {
-					case t&fs.ModeSymlink != 0:
-						kind = "l"
-						links++
-					case t.IsDir():
-						kind = "d"
-						dirs++
-					default:
-						files++
-					}
-					fmt.Printf("%s  %s/%s\n", kind, r.Dir, e.Name())
+			for _, e := range r.Entries {
+				t := e.Type()
+				kind := "f"
+				switch {
+				case t&fs.ModeSymlink != 0:
+					kind = "l"
+					links++
+				case t.IsDir():
+					kind = "d"
+					dirs++
+				default:
+					files++
 				}
-			} else if needCounts {
-				for _, e := range r.Entries {
-					t := e.Type()
-					switch {
-					// TODO: in --follow-links, the links are counted as the files/dirs they resolve to
-					case t&fs.ModeSymlink != 0:
-						links++
-					case t.IsDir():
-						dirs++
-					default:
-						files++
-					}
+
+				if *print {
+					fmt.Printf("%s  %s/%s\n", kind, r.Dir, e.Name())
 				}
 			}
 		}
