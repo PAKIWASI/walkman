@@ -237,14 +237,14 @@ func (w *Walkman) visit(
 	_ context.Context,
 	item walkItem,
 	spawn func(walkItem),
-) (*WalkResult, error) {
+) (WalkResult, bool, error) {
 	dirs, err := readDir(item.path)
 	if err != nil {
 		// A permission-denied (or similar) directory is a fact about that
 		// one item, not a reason to kill every other worker in the pool.
 		// Ret stays nil: the directory itself couldn't be read at all, so
 		// there's nothing else this result can carry.
-		return &WalkResult{Dir: item.path, Errs: []DirErr{{Name: item.path, Err: err}}}, nil
+		return WalkResult{Dir: item.path, Errs: []DirErr{{Name: item.path, Err: err}}}, true, nil
 	}
 
 	before := len(dirs)
@@ -279,7 +279,7 @@ func (w *Walkman) visit(
 		})
 	}
 
-	return &WalkResult{Dir: item.path, Entries: dirs}, nil
+	return WalkResult{Dir: item.path, Entries: dirs}, true, nil
 }
 
 // visitSym is visit's counterpart for followLinks: same item type, same
@@ -292,10 +292,10 @@ func (w *Walkman) visitSym(
 	_ context.Context,
 	item walkItem,
 	spawn func(walkItem),
-) (*WalkResult, error) {
+) (WalkResult, bool, error) {
 	dirs, err := readDir(item.path)
 	if err != nil {
-		return &WalkResult{Dir: item.path, Errs: []DirErr{{Name: item.path, Err: err}}}, nil
+		return WalkResult{Dir: item.path, Errs: []DirErr{{Name: item.path, Err: err}}}, true, nil
 	}
 
 	before := len(dirs)
@@ -370,7 +370,7 @@ func (w *Walkman) visitSym(
 		})
 	}
 
-	return &result, nil
+	return result, true, nil
 }
 
 // Walk starts walking root and returns a channel of per-directory results.

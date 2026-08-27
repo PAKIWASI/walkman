@@ -19,6 +19,7 @@
 - [How it works](#how-it-works)
 - [CLI tools](#cli-tools)
 - [Benchmarks](#benchmarks)
+- [Comparison: walkman vs ignore](#comparison-walkman-vs-ignore)
 - [Testing](#testing)
 - [Limitations / roadmap](#limitations--roadmap)
 - [Project layout](#project-layout)
@@ -242,6 +243,35 @@ cd test
 ```
 
 Or run one shape/harness at a time with `build_tree.sh` + `bench_harness.sh` (hyperfine) / `perf_bench.sh` (perf counters). See each script's `--help`.
+
+## Comparison: walkman vs ignore
+
+| Aspect | `walkman` (Go) | `ignore::WalkParallel` (Rust) |
+| --- | --- | --- |
+| **Delivery Model** | **Directory-batched streaming** (`<-chan WalkResult`) | **Entry-level parallel visitor** (`ParallelVisitor` callback) |
+| **Consumer Execution** | Single-goroutine stream consumption | Concurrent in-thread callbacks across worker threads |
+| **Directory Context** | Complete `[]fs.DirEntry` slice per directory | Dispersed individual file/dir entries |
+| **Memory / Allocations** | Per-directory slice allocations & channel buffers | In-place buffer reuse, minimal heap churn |
+| **Best-fit Workloads** | Wide trees, directory-level indexing/aggregation | Deep trees, file-level filtering/grep searching |
+
+### Strengths & Weaknesses
+
+#### `walkman`
+- **Strengths:**
+  - **Directory-level autonomy:** Caller receives all entries of a directory together, making folder-level aggregation, custom batch filtering, and batch I/O simple without cross-thread coordination.
+  - **Wide-tree throughput:** Work-stealing pool keeps all CPU cores saturated on wide, shallow trees, consistently beating `ignore` across worker counts.
+  - **Clean consumer consumption:** Channel-based consumption eliminates mutex and atomic contention in consumer code.
+- **Weaknesses:**
+  - **Allocation & channel overhead:** Streaming per-directory slices across channels increases page faults and cache misses on deep/narrow trees.
+  - **Completion-ordered:** Results arrive non-deterministically as directory tasks complete.
+
+#### `ignore`
+- **Strengths:**
+  - **Minimal memory pressure:** Reuses thread-local buffers, resulting in fewer page faults and lower cache misses on deep and mixed trees.
+  - **Optimized for item filtering:** Built for ripgrep-style search where individual files are filtered independently inside worker threads.
+- **Weaknesses:**
+  - **No directory batching:** Does not expose whole directory contents at once; grouping entries by directory requires user-managed thread synchronization.
+  - **Thread-safety burden:** Aggregation or counting in caller code must be synchronized across worker threads (e.g. via atomics or mutexes).
 
 ## Testing
 
