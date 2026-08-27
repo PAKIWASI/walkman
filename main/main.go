@@ -1,9 +1,7 @@
 // walkman-cli: a CLI wrapper around the walkman package built to be
-// directly comparable to walkdir-cli (the Rust `walkdir` wrapper). Same
+// directly comparable to the Rust `ignore` wrapper). Same
 // flags, same semantics, same output shape, so timing numbers between the
 // two binaries are actually measuring the same thing.
-//
-// Usage mirrors walkdir-cli exactly:
 //
 //	walkman-bench [OPTIONS] [ROOT]
 //
