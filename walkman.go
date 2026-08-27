@@ -20,7 +20,7 @@ var (
 )
 
 type walkConf struct {
-	followLinks bool // off by default
+	followLinks bool   // off by default
 	maxDepth    uint32 // 0 means unlimited
 	skipSet     map[string]struct{}
 }
@@ -52,7 +52,12 @@ type WalkResult struct {
 type walkItem struct {
 	depth  uint32
 	path   string
-	parent *walkItem
+	parent *ancestorNode
+}
+
+type ancestorNode struct {
+	path string
+	parent *ancestorNode
 }
 
 // dirKey identifies a directory by device+inode, stable across the
@@ -60,7 +65,6 @@ type walkItem struct {
 type dirKey struct {
 	dev, ino uint64
 }
-
 
 // statKey Lstat's path and returns its dirKey. Only called when followLinks is on,
 // and only against a resolved symlink target and the ancestors being checked against it.
@@ -94,7 +98,7 @@ func DefaultPoolConfig() PoolConfig {
 	return PoolConfig{
 		PoolSize:         runtime.GOMAXPROCS(0),
 		InitialWorkerCap: 32, // TODO: experiment with these numbers
-		ResultBuffSize:   64,
+		ResultBuffSize:   256,
 	}
 }
 
@@ -281,7 +285,7 @@ func (w *Walkman) visitSym(
 		if !ancestorsResolved {
 			ancestorsResolved = true
 			ancestorKeys = localBuf[:0]
-			for n := &item; n != nil; n = n.parent {
+			for n := item.parent; n != nil; n = n.parent {
 				nk, err := statKey(n.path)
 				if err != nil {
 					continue
@@ -348,7 +352,7 @@ func (w *Walkman) visitSym(
 		spawn(walkItem{
 			path:   childPath,
 			depth:  item.depth + 1,
-			parent: &item,
+			parent: item.parent,
 		})
 	}
 

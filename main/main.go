@@ -91,6 +91,7 @@ func main() {
 				for _, e := range r.Entries {
 					t := e.Type()
 					switch {
+					// TODO: in --follow-links, the links are counted as the files/dirs they resolve to
 					case t&fs.ModeSymlink != 0:
 						links++
 					case t.IsDir():
