@@ -7,3 +7,4 @@ bench_results/
 bench_results_symlinks/
 
 *.log
+*.csv
