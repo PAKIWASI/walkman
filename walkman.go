@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"syscall"
 
 	wsp "github.com/PAKIWASI/workstealpool"
@@ -49,17 +50,14 @@ type WalkResult struct {
 	Errs    []DirErr
 }
 
-// walkItem is the actual work-stealing pool item. parent is only non-nil
-// when followLinks is on, so plain walks pay zero heap allocation overhead.
 type walkItem struct {
-	depth  uint32
-	path   string
-	parent *ancestorNode
+	depth uint32
+	leaf  *pathNode
 }
 
-type ancestorNode struct {
-	path   string
-	parent *ancestorNode
+type pathNode struct {
+	name   string
+	parent *pathNode
 }
 
 // dirKey identifies a directory by device+inode, stable across the
@@ -196,6 +194,27 @@ func filterSkipped(dirs []fs.DirEntry, skip map[string]struct{}) []fs.DirEntry {
 	return dirs[:n]
 }
 
+func computePath(leaf *pathNode, buf []byte) []byte {
+	// pass 1: cacluate the total size needed
+	reqSize := 0
+	for n := leaf; n != nil; n = n.parent {
+		reqSize += len(n.path)
+	}
+	// allocate that space
+	buf = slices.Grow(buf, reqSize)
+	buf = buf[:reqSize]
+	// pass 2: write the string from the leaf to the root in reverse
+	start := reqSize
+	end := reqSize
+	for n := leaf; n != nil; n = n.parent {
+		start -= len(n.path)
+		copy(buf[start:end], n.path)
+		end = start
+	}
+	// return the slice to broadcast the new len/cap
+	return buf
+}
+
 // visit is the Task run for every directory the walk encounters. It is
 // called concurrently, from any worker in the pool for different items,
 // so it must not touch anything on Walkman that isn't safe for that
@@ -205,13 +224,15 @@ func (w *Walkman) visit(
 	item walkItem,
 	spawn func(walkItem),
 ) (WalkResult, bool, error) {
-	dirs, err := readDir(item.path)
+
+	itemPath := computePath(item.leaf, buf []byte)
+	dirs, err := readDir(itemPath)
 	if err != nil {
 		// A permission-denied (or similar) directory is a fact about that
 		// one item, not a reason to kill every other worker in the pool.
 		// Ret stays nil: the directory itself couldn't be read at all, so
 		// there's nothing else this result can carry.
-		return WalkResult{Dir: item.path, Errs: []DirErr{{Name: item.path, Err: err}}}, true, nil
+		return WalkResult{Dir: itemPath, Errs: []DirErr{{Name: itemPath, Err: err}}}, true, nil
 	}
 
 	before := len(dirs)
@@ -241,8 +262,8 @@ func (w *Walkman) visit(
 		}
 
 		spawn(walkItem{
-			path:  join(item.path, entry.Name()),
 			depth: item.depth + 1,
+			leaf: &pathNode{path: , parent: item.leaf},
 		})
 	}
 
@@ -276,6 +297,8 @@ func (w *Walkman) visitSym(
 
 	// We do a syscall for dirkey only once per directory.
 	// The rest of the symlinks just reuse those dirkey values
+	// TODO: i don't like these being recreated on every run
+	// where can we store extra info about each worker?
 	var (
 		localBuf          [32]dirKey
 		ancestorKeys      []dirKey
@@ -405,7 +428,7 @@ func (w *Walkman) Walk(root string) <-chan WalkResult {
 	root = filepath.Clean(root)
 
 	// parent is nil for the first walkItem
-	w.pool.Submit(walkItem{path: root, depth: 0})
+	w.pool.Submit(walkItem{depth: 0, leaf: &pathNode{path: root}})
 	return w.pool.Run()
 }
 

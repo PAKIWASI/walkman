@@ -1,4 +1,6 @@
 github.com/PAKIWASI/workstealpool v0.1.2-0.20260828101240-d566ea7498f6 h1:L7JEdXgPLF0hyEYSENP9n41xiHjYYCNK5F65IMVmKKU=
 github.com/PAKIWASI/workstealpool v0.1.2-0.20260828101240-d566ea7498f6/go.mod h1:HgX5hjw90fJQsB98lEIlDwDvzRjU616cyy0Dow12CGo=
+github.com/PAKIWASI/workstealpool v0.1.2-0.20260828204452-a80df8549eb8 h1:oZcxd9s2LZmr/yrda/fLUGCxKGq+CCG5yrIBl3mb3Tk=
+github.com/PAKIWASI/workstealpool v0.1.2-0.20260828204452-a80df8549eb8/go.mod h1:HgX5hjw90fJQsB98lEIlDwDvzRjU616cyy0Dow12CGo=
 golang.org/x/sync v0.22.0 h1:SZjpbeLmrCk4xhRSZFNZW5gFUeCeFgjekvI/+gfScek=
 golang.org/x/sync v0.22.0/go.mod h1:9xrNwdLfx4jkKbNva9FpL6vEN7evnE43NNNJQ2LF3+0=
