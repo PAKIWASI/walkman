@@ -499,18 +499,19 @@ func TestWalk_BrokenSymlink_DoesNotCrash(t *testing.T) {
 	if len(results) != 1 {
 		t.Fatalf("got %d results, want 1 (just root)", len(results))
 	}
-	if len(results[0].Errs) != 0 {
-		t.Fatalf("root result Err = %v, want empty", results[0].Errs)
+
+	if len(results[0].Errs) != 1 {
+		t.Fatalf("root result Errs = %v, want exactly 1 (the dangling symlink)", results[0].Errs)
+	}
+	if got := results[0].Errs[0]; got.Name != "dangling" || !errors.Is(got.Err, errDanglingSymlink) {
+		t.Fatalf("root result Errs[0] = %+v, want {Name: dangling, Err: errDanglingSymlink}", got)
 	}
 
-	foundLink := false
+	// A dangling symlink is reported via Errs, not left in Entries.
 	for _, e := range results[0].Entries {
 		if e.Name() == "dangling" {
-			foundLink = true
+			t.Fatalf("dangling symlink found in Entries, want it removed since it's reported in Errs")
 		}
-	}
-	if !foundLink {
-		t.Fatalf("dangling symlink missing from root's Ret entirely")
 	}
 }
 
@@ -667,8 +668,10 @@ func TestWalk_FollowLinks_ConsumerCounts(t *testing.T) {
 	}
 
 	files, dirs, errs := countEntries(results)
-	if errs != 0 {
-		t.Fatalf("errs = %d, want 0", errs)
+	// "dangling" is a real symlink but resolves to nothing, so it's
+	// reported as a DirErr rather than counted as a file or dir.
+	if errs != 1 {
+		t.Fatalf("errs = %d, want 1 (the dangling symlink)", errs)
 	}
 	if files < 2 {
 		t.Errorf("files = %d, want >= 2", files)

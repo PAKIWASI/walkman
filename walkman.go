@@ -16,8 +16,9 @@ import (
 
 // Sentinel errors reported via WalkResult.Err
 var (
-	errSymlinkCycle = errors.New("walkman: symlink cycle")
-	errNoDevInoInfo = errors.New("walkman: no dev/ino info available")
+	errSymlinkCycle    = errors.New("walkman: symlink cycle")
+	errNoDevInoInfo    = errors.New("walkman: no dev/ino info available")
+	errDanglingSymlink = errors.New("walkman: dangling/unresolved symlink")
 )
 
 type walkConf struct {
@@ -301,7 +302,16 @@ func (w *Walkman) visitSym(
 		return false
 	}
 
-	for i := range dirs {
+	// no new heap alloc, just shortening len
+	swapDel := func(i int) []fs.DirEntry {
+		n := len(dirs)
+		dirs[i] = dirs[n-1]
+		return dirs[:n-1]
+	}
+
+	// swapDel below shrinks dirs mid-loop (cycle case), which would walk the slice out of bounds.
+	// i is only advanced when we don't delete, so a swapped-in entry at position i gets rechecked.
+	for i := 0; i < len(dirs); {
 		entry := dirs[i]
 
 		childPath := join(item.path, entry.Name())
@@ -315,7 +325,13 @@ func (w *Walkman) visitSym(
 			// resolves to. One os.Stat resolves the whole chain
 			info, err := os.Stat(childPath)
 			if err != nil {
-				// Dangling/unresolvable symlink is skipped.
+				// Dangling/unresolvable symlink. Report via the err slice so
+				// users can easily distingish them
+				result.Errs = append(
+					result.Errs,
+					DirErr{Name: entry.Name(), Err: errDanglingSymlink},
+				)
+				dirs = swapDel(i)
 				continue
 			}
 
@@ -323,10 +339,12 @@ func (w *Walkman) visitSym(
 				// Resolves to a non-directory (file, device, etc)
 				// when symlink is a non-dir, we should resolve and report that file
 				dirs[i] = fs.FileInfoToDirEntry(info)
+				i++
 				continue
 			}
 			st, ok := info.Sys().(*syscall.Stat_t)
 			if !ok {
+				i++
 				continue
 			}
 			k := dirKey{dev: uint64(st.Dev), ino: st.Ino}
@@ -334,29 +352,44 @@ func (w *Walkman) visitSym(
 			// Cycle detected: record it against this one entry and skip
 			// descending into it, but keep processing the rest of dirs.
 			if hasCycle(k) {
-				result.Errs = append(result.Errs, DirErr{Name: entry.Name(), Err: errSymlinkCycle})
-				continue
+				result.Errs = append(
+					result.Errs,
+					DirErr{Name: entry.Name(), Err: errSymlinkCycle},
+				)
+				dirs = swapDel(i)
+				continue // recheck index i, now holding the swapped-in entry
 			}
 
 			// A symlink-to-directory entry never has fs.ModeDir set on its
-			// own DirEntry. Force isDir now that we've resolved it.
+			// own DirEntry (Lstat sees fs.ModeSymlink). Rewrite it to the
+			// resolved, dir-typed DirEntry, same as the non-dir branch
+			// above, so callers inspecting Entries see it as a directory.
+			dirs[i] = fs.FileInfoToDirEntry(info)
 			isDir = true
 		}
 
 		if !isDir {
+			i++
 			continue
 		}
 
 		if w.conf.maxDepth != 0 && item.depth+1 > w.conf.maxDepth {
+			i++
 			continue
 		}
 
 		spawn(walkItem{
-			path:   childPath,
-			parent: item.parent,
+			path: childPath,
+			// each child's parent is a ptr to a node with the parent's path and it's own parent ptr
+			parent: &ancestorNode{path: item.path, parent: item.parent},
 			depth:  item.depth + 1,
 		})
+		i++
 	}
+
+	// dirs may have been reassigned (shortened) by swapDel above; result
+	// was built from the pre-loop dirs header, so refresh it here.
+	result.Entries = dirs
 
 	return result, true, nil
 }
@@ -371,6 +404,7 @@ func (w *Walkman) Walk(root string) <-chan WalkResult {
 	// without re-running filepath.Clean per entry.
 	root = filepath.Clean(root)
 
+	// parent is nil for the first walkItem
 	w.pool.Submit(walkItem{path: root, depth: 0})
 	return w.pool.Run()
 }
