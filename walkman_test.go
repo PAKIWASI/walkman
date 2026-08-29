@@ -1379,3 +1379,244 @@ func TestWalk_SkipList_AgreesWithSequentialCount(t *testing.T) {
 			gotFiles, gotDirs, wantFiles, wantDirs, len(skipList), total)
 	}
 }
+
+func Test_computePath(t *testing.T) {
+	tests := []struct {
+		name string
+		leaf *pathNode
+		want string
+	}{
+		{"relative root", &pathNode{name: "."}, "."},
+		{"relative root + child", &pathNode{name: "sub", parent: &pathNode{name: "."}}, "./sub"},
+		{"absolute root", &pathNode{name: "/"}, "/"},
+		{"absolute root + child", &pathNode{name: "sub", parent: &pathNode{name: "/tmp"}}, "/tmp/sub"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g, _ := computePath(tt.leaf, nil, nil)
+			got := string(g)
+			if got != tt.want {
+				t.Errorf("computePath() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func Test_joinLeaf(t *testing.T) {
+	tests := []struct {
+		name   string
+		parent string
+		leaf   string
+		want   string
+	}{
+		{"parent & leaf", "parent", "leaf", "parent/leaf"},
+		{"root & leaf", "/", "leaf", "/leaf"},
+		{"relative & leaf", ".", "leaf", "./leaf"},
+		{"root final sep present", "/home/", "wasi", "/home/wasi"},
+		// {"leaf sep present", "/home", "wasi/", "home/wasi"}, // Not possible?
+
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := string(joinLeaf([]byte(tt.parent), []byte(tt.leaf)))
+			if got != tt.want {
+				t.Errorf("joinLeaf() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWalk_RelativeRoot(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	w := NewWalkman(false, 0, nil)
+	var got []string
+	for r := range w.Walk(".") {
+		got = append(got, r.Dir)
+	}
+	if err := w.Wait(); err != nil {
+		t.Fatal(err)
+	}
+
+	slices.Sort(got)
+	want := []string{".", "./sub"}
+	if !slices.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func Test_WorkerBufferPersistsGrowth(t *testing.T) {
+	dir := t.TempDir()
+	// build a path deep enough that computePath must grow past the 256-byte default
+	deep := dir
+	for i := 0; i < 40; i++ {
+		deep = filepath.Join(deep, "aaaaaaaaaa")
+		if err := os.Mkdir(deep, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	w := NewWalkmanWithConfig(false, 0, nil, PoolConfig{PoolSize: 1, InitialWorkerCap: 32, ResultBuffSize: 64})
+	for range w.Walk(dir) {
+	}
+	if err := w.Wait(); err != nil {
+		t.Fatal(err)
+	}
+
+	if cap(w.workers[0].pathBuf) <= 256 {
+		t.Errorf("pathBuf cap = %d, want > 256 (growth should persist across calls)", cap(w.workers[0].pathBuf))
+	}
+}
+
+func TestWalkman_visitSym(t *testing.T) {
+	fileOnlyRoot := buildTree(t, []string{"a.txt"})
+	subdirRoot := buildTree(t, []string{"sub/"})
+	maxDepthRoot := buildTree(t, []string{"sub/"})
+	skipRoot := buildTree(t, []string{"keep/", "skipme/"})
+
+	cycleRoot := buildTree(t, nil)
+	skipIfNoSymlinkSupport(t, cycleRoot)
+	cycleLink := filepath.Join(cycleRoot, "loop")
+	if err := os.Symlink(cycleRoot, cycleLink); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	danglingRoot := buildTree(t, nil)
+	skipIfNoSymlinkSupport(t, danglingRoot)
+	danglingLink := filepath.Join(danglingRoot, "dangling")
+	if err := os.Symlink(filepath.Join(danglingRoot, "does_not_exist"), danglingLink); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	tests := []struct {
+		name        string
+		followLinks bool
+		maxDepth    uint32
+		skipList    []string
+		item        walkItem
+		wantDir     string
+		wantSpawn   []string // names of children we expect spawn() to be called for
+		wantErrIs   error    // sentinel we expect somewhere in got.Errs, nil if none expected
+		want2       bool
+		wantErr     bool
+	}{
+		{
+			name:        "empty dir",
+			followLinks: true,
+			item:        walkItem{depth: 0, leaf: &pathNode{name: buildTree(t, nil)}},
+			wantDir:     "", // filled in below, see note
+			wantSpawn:   nil,
+			want2:       true,
+		},
+		{
+			name:        "file only, no spawn",
+			followLinks: true,
+			item:        walkItem{depth: 0, leaf: &pathNode{name: fileOnlyRoot}},
+			wantDir:     fileOnlyRoot,
+			wantSpawn:   nil,
+			want2:       true,
+		},
+		{
+			name:        "subdirectory triggers spawn",
+			followLinks: true,
+			item:        walkItem{depth: 0, leaf: &pathNode{name: subdirRoot}},
+			wantDir:     subdirRoot,
+			wantSpawn:   []string{"sub"},
+			want2:       true,
+		},
+		{
+			name:        "maxDepth reached, subdirectory not spawned",
+			followLinks: true,
+			maxDepth:    1,
+			item:        walkItem{depth: 1, leaf: &pathNode{name: maxDepthRoot}}, // depth+1 (2) > maxDepth (1)
+			wantDir:     maxDepthRoot,
+			wantSpawn:   nil,
+			want2:       true,
+		},
+		{
+			name:        "skipList filters entry, no spawn for it",
+			followLinks: true,
+			skipList:    []string{"skipme"},
+			item:        walkItem{depth: 0, leaf: &pathNode{name: skipRoot}},
+			wantDir:     skipRoot,
+			wantSpawn:   []string{"keep"},
+			want2:       true,
+		},
+		{
+			name:        "symlink cycle reported, not spawned",
+			followLinks: true,
+			item:        walkItem{depth: 0, leaf: &pathNode{name: cycleRoot}},
+			wantDir:     cycleRoot,
+			wantSpawn:   nil,
+			wantErrIs:   errSymlinkCycle,
+			want2:       true,
+		},
+		{
+			name:        "dangling symlink reported, not spawned",
+			followLinks: true,
+			item:        walkItem{depth: 0, leaf: &pathNode{name: danglingRoot}},
+			wantDir:     danglingRoot,
+			wantSpawn:   nil,
+			wantErrIs:   errDanglingSymlink,
+			want2:       true,
+		},
+	}
+
+	tests[0].wantDir = tests[0].item.leaf.name // empty-dir root, generated after buildTree
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := NewWalkman(tt.followLinks, tt.maxDepth, tt.skipList)
+
+			var spawned []string
+			spawn := func(wi walkItem) {
+				spawned = append(spawned, wi.leaf.name)
+			}
+
+			got, got2, gotErr := w.visitSym(t.Context(), 0, tt.item, spawn)
+
+			if gotErr != nil {
+				if !tt.wantErr {
+					t.Fatalf("visitSym() failed: %v", gotErr)
+				}
+				return
+			}
+			if tt.wantErr {
+				t.Fatal("visitSym() succeeded unexpectedly")
+			}
+
+			if got.Dir != tt.wantDir {
+				t.Errorf("visitSym() Dir = %v, want %v", got.Dir, tt.wantDir)
+			}
+			if got2 != tt.want2 {
+				t.Errorf("visitSym() got2 = %v, want %v", got2, tt.want2)
+			}
+
+			slices.Sort(spawned)
+			wantSpawn := slices.Clone(tt.wantSpawn)
+			slices.Sort(wantSpawn)
+			if !slices.Equal(spawned, wantSpawn) {
+				t.Errorf("spawned = %v, want %v", spawned, wantSpawn)
+			}
+
+			if tt.wantErrIs != nil {
+				found := false
+				for _, e := range got.Errs {
+					if errors.Is(e.Err, tt.wantErrIs) {
+						found = true
+					}
+				}
+				if !found {
+					t.Errorf("got.Errs = %v, want one matching %v", got.Errs, tt.wantErrIs)
+				}
+			} else if len(got.Errs) != 0 {
+				t.Errorf("got.Errs = %v, want none", got.Errs)
+			}
+		})
+	}
+}

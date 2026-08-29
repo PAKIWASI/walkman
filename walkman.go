@@ -106,11 +106,12 @@ func DefaultPoolConfig() PoolConfig {
 type WorkerState struct {
 	dirBuf  []dirKey
 	pathBuf []byte
+	offsets []int
 }
 
 type Walkman struct {
-	conf walkConf
-	pool *wsp.WorkerPool[walkItem, WalkResult]
+	conf    walkConf
+	pool    *wsp.WorkerPool[walkItem, WalkResult]
 	workers []WorkerState
 }
 
@@ -146,6 +147,7 @@ func NewWalkmanWithConfig(
 	for i := range w.workers {
 		w.workers[i].dirBuf = make([]dirKey, 16)
 		w.workers[i].pathBuf = make([]byte, 256)
+		w.workers[i].offsets = make([]int, 0, 16)
 	}
 
 	// The pool is bound to one Task at construction. Which one we hand it
@@ -194,11 +196,13 @@ func joinLeaf(parent, leaf []byte) []byte {
 	if parent[n-1] != sep {
 		s++
 	}
-	parent = slices.Grow(parent, n + l + s)
+	// grow and reslice
+	parent = slices.Grow(parent, n+l+s)
+	parent = parent[:n+l+s]
 	if s == 1 {
 		parent[n] = sep
 	}
-	copy(parent[n+s:n+l], leaf)
+	copy(parent[n+s:n+l+s], leaf)
 	return parent
 }
 
@@ -217,28 +221,46 @@ func filterSkipped(dirs []fs.DirEntry, skip map[string]struct{}) []fs.DirEntry {
 	return dirs[:n]
 }
 
-func computePath(leaf *pathNode, buf []byte) []byte {
-	// pass 1: cacluate the total size needed
-	reqSize := 0
+// computePath materializes leaf's full path into buf (growing if needed).
+// If offsets is non-nil, it also records, for each node from leaf up to
+// root (same order as walking the leaf.parent chain, offsets[0] = leaf
+// itself), the exclusive end index of that node's own path within the
+// returned buf. Since every ancestor's path is a prefix of leaf's full
+// path, buf[:offsets[i]] is the i-th ancestor's complete path with zero
+// extra materialization - callers doing per-ancestor lookups (cycle
+// detection) get every ancestor path as a slice of this one buffer.
+func computePath(leaf *pathNode, buf []byte, offsets []int) ([]byte, []int) {
+	reqSize, depth := 0, 0
 	for n := leaf; n != nil; n = n.parent {
-		reqSize += len(n.name) + 1 // + 1 for each seperator
+		reqSize += len(n.name)
+		if n.parent != nil {
+			reqSize++
+		}
+		depth++
 	}
-	// allocate that space
 	buf = slices.Grow(buf, reqSize)
 	buf = buf[:reqSize]
-	// pass 2: write the string from the leaf to the root in reverse
-	start := reqSize
-	end := reqSize
-	sep := byte(os.PathSeparator)
-	for n := leaf; n != nil; n = n.parent {
-		start -= len(n.name)
-		copy(buf[start:end], n.name)
-		start--
-		buf[start] = sep
-		end = start
+
+	if offsets != nil {
+		offsets = slices.Grow(offsets[:0], depth)
+		offsets = offsets[:depth]
 	}
-	// return the slice to broadcast the new len/cap
-	return buf
+
+	pos := reqSize
+	i := 0
+	for n := leaf; n != nil; n = n.parent {
+		if offsets != nil {
+			offsets[i] = pos // end-of-path offset for n, captured before we consume its bytes
+			i++
+		}
+		pos -= len(n.name)
+		copy(buf[pos:], n.name)
+		if n.parent != nil {
+			pos--
+			buf[pos] = os.PathSeparator
+		}
+	}
+	return buf, offsets
 }
 
 // save because we only need a read-only view
@@ -262,11 +284,14 @@ func (w *Walkman) visit(
 	spawn func(walkItem),
 ) (WalkResult, bool, error) {
 
-	worker := w.workers[workerID]
-	worker.pathBuf = computePath(item.leaf, worker.pathBuf)
-	pathStr := byteToStringNoCopy(worker.pathBuf)
+	worker := &w.workers[workerID]
+	worker.pathBuf, _ = computePath(item.leaf, worker.pathBuf, nil)
+	// copy made: this copy is sent as result
+	pathStr := string(worker.pathBuf)
+	// view into the byte buffer: for local calls to function that accept a string
+	pathView := byteToStringNoCopy(worker.pathBuf)
 
-	dirs, err := readDir(pathStr)
+	dirs, err := readDir(pathView)
 	if err != nil {
 		// A permission-denied (or similar) directory is a fact about that
 		// one item, not a reason to kill every other worker in the pool.
@@ -303,7 +328,7 @@ func (w *Walkman) visit(
 
 		spawn(walkItem{
 			depth: item.depth + 1,
-			leaf: &pathNode{name: entry.Name(), parent: item.leaf},
+			leaf:  &pathNode{name: entry.Name(), parent: item.leaf},
 		})
 	}
 
@@ -323,11 +348,14 @@ func (w *Walkman) visitSym(
 	spawn func(walkItem),
 ) (WalkResult, bool, error) {
 
-	worker := w.workers[workerID]
-	worker.pathBuf = computePath(item.leaf, worker.pathBuf)
-	pathStr := byteToStringNoCopy(worker.pathBuf)
+	worker := &w.workers[workerID]
+	worker.pathBuf, worker.offsets = computePath(item.leaf, worker.pathBuf, worker.offsets)
+	// copy made: this copy is sent as result
+	pathStr := string(worker.pathBuf)
+	// view into the byte buffer: for local calls to function that accept a string
+	pathView := byteToStringNoCopy(worker.pathBuf)
 
-	dirs, err := readDir(pathStr)
+	dirs, err := readDir(pathView)
 	if err != nil {
 		return WalkResult{Dir: pathStr, Errs: []DirErr{{Name: pathStr, Err: err}}}, true, nil
 	}
@@ -349,10 +377,8 @@ func (w *Walkman) visitSym(
 		if !ancestorsResolved {
 			ancestorsResolved = true
 			worker.dirBuf = worker.dirBuf[:0]
-			for n := item.leaf; n != nil; n = n.parent {
-				// append the leaf to the parent, hand out READ ONLY
-				leafBuf := joinLeaf(worker.pathBuf, stringTobyteNoCopy(n.name))
-				nk, err := statKey(byteToStringNoCopy(leafBuf))
+			for _, end := range worker.offsets {
+				nk, err := statKey(byteToStringNoCopy(worker.pathBuf[:end]))
 				if err != nil {
 					continue
 				}
@@ -445,8 +471,8 @@ func (w *Walkman) visitSym(
 		}
 
 		spawn(walkItem{
-			depth:  item.depth + 1,
-			leaf: &pathNode{name: entry.Name(), parent: item.leaf},
+			depth: item.depth + 1,
+			leaf:  &pathNode{name: entry.Name(), parent: item.leaf},
 		})
 		i++
 	}
