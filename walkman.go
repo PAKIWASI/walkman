@@ -9,9 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"syscall"
-	"unsafe"
 
 	wsp "github.com/PAKIWASI/workstealpool"
 )
@@ -57,7 +55,7 @@ type walkItem struct {
 }
 
 type pathNode struct {
-	name   string
+	path    string
 	parent *pathNode
 }
 
@@ -104,9 +102,8 @@ func DefaultPoolConfig() PoolConfig {
 }
 
 type WorkerState struct {
-	dirBuf  []dirKey
-	pathBuf []byte
-	offsets []int
+	dirBuf    []dirKey
+	pathStore StringStore
 }
 
 type Walkman struct {
@@ -146,8 +143,7 @@ func NewWalkmanWithConfig(
 	w.workers = make([]WorkerState, pc.PoolSize)
 	for i := range w.workers {
 		w.workers[i].dirBuf = make([]dirKey, 16)
-		w.workers[i].pathBuf = make([]byte, 256)
-		w.workers[i].offsets = make([]int, 0, 16)
+		w.workers[i].pathStore = NewPathStorage(0)
 	}
 
 	// The pool is bound to one Task at construction. Which one we hand it
@@ -182,30 +178,6 @@ func readDir(name string) ([]fs.DirEntry, error) {
 	return f.ReadDir(-1)
 }
 
-func joinLeaf(parent, leaf []byte) []byte {
-	n := len(parent)
-	if n == 0 {
-		return leaf
-	}
-	l := len(leaf)
-	if l == 0 {
-		return parent
-	}
-	s := 0
-	sep := byte(os.PathSeparator)
-	if parent[n-1] != sep {
-		s++
-	}
-	// grow and reslice
-	parent = slices.Grow(parent, n+l+s)
-	parent = parent[:n+l+s]
-	if s == 1 {
-		parent[n] = sep
-	}
-	copy(parent[n+s:n+l+s], leaf)
-	return parent
-}
-
 // filterSkipped removes, in place and without preserving order, every
 // entry whose Name() is in skip. It's a swap-delete
 func filterSkipped(dirs []fs.DirEntry, skip map[string]struct{}) []fs.DirEntry {
@@ -221,56 +193,10 @@ func filterSkipped(dirs []fs.DirEntry, skip map[string]struct{}) []fs.DirEntry {
 	return dirs[:n]
 }
 
-// computePath materializes leaf's full path into buf (growing if needed).
-// If offsets is non-nil, it also records, for each node from leaf up to
-// root (same order as walking the leaf.parent chain, offsets[0] = leaf
-// itself), the exclusive end index of that node's own path within the
-// returned buf. Since every ancestor's path is a prefix of leaf's full
-// path, buf[:offsets[i]] is the i-th ancestor's complete path with zero
-// extra materialization - callers doing per-ancestor lookups (cycle
-// detection) get every ancestor path as a slice of this one buffer.
-func computePath(leaf *pathNode, buf []byte, offsets []int) ([]byte, []int) {
-	reqSize, depth := 0, 0
-	for n := leaf; n != nil; n = n.parent {
-		reqSize += len(n.name)
-		if n.parent != nil {
-			reqSize++
-		}
-		depth++
-	}
-	buf = slices.Grow(buf, reqSize)
-	buf = buf[:reqSize]
+func (w *Walkman) newPath(workerID int, parent, child string) string {
 
-	if offsets != nil {
-		offsets = slices.Grow(offsets[:0], depth)
-		offsets = offsets[:depth]
-	}
-
-	pos := reqSize
-	i := 0
-	for n := leaf; n != nil; n = n.parent {
-		if offsets != nil {
-			offsets[i] = pos // end-of-path offset for n, captured before we consume its bytes
-			i++
-		}
-		pos -= len(n.name)
-		copy(buf[pos:], n.name)
-		if n.parent != nil {
-			pos--
-			buf[pos] = os.PathSeparator
-		}
-	}
-	return buf, offsets
-}
-
-// save because we only need a read-only view
-func byteToStringNoCopy(b []byte) string {
-	return unsafe.String(unsafe.SliceData(b), len(b))
-}
-
-// save because we only need a read-only view
-func stringTobyteNoCopy(s string) []byte {
-	return unsafe.Slice(unsafe.StringData(s), len(s))
+	id := w.workers[workerID].pathStore.StorePath(parent, child)
+	return id.String()
 }
 
 // visit is the Task run for every directory the walk encounters. It is
@@ -283,21 +209,14 @@ func (w *Walkman) visit(
 	item walkItem,
 	spawn func(walkItem),
 ) (WalkResult, bool, error) {
-
-	worker := &w.workers[workerID]
-	worker.pathBuf, _ = computePath(item.leaf, worker.pathBuf, nil)
-	// copy made: this copy is sent as result
-	pathStr := string(worker.pathBuf)
-	// view into the byte buffer: for local calls to function that accept a string
-	pathView := byteToStringNoCopy(worker.pathBuf)
-
-	dirs, err := readDir(pathView)
+	path := item.leaf.path
+	dirs, err := readDir(path)
 	if err != nil {
 		// A permission-denied (or similar) directory is a fact about that
 		// one item, not a reason to kill every other worker in the pool.
 		// Ret stays nil: the directory itself couldn't be read at all, so
 		// there's nothing else this result can carry.
-		return WalkResult{Dir: pathStr, Errs: []DirErr{{Name: pathStr, Err: err}}}, true, nil
+		return WalkResult{Dir: path, Errs: []DirErr{{Name: path, Err: err}}}, true, nil
 	}
 
 	before := len(dirs)
@@ -328,11 +247,11 @@ func (w *Walkman) visit(
 
 		spawn(walkItem{
 			depth: item.depth + 1,
-			leaf:  &pathNode{name: entry.Name(), parent: item.leaf},
+			leaf: &pathNode{path: w.newPath(workerID, path, entry.Name()), parent: item.leaf},
 		})
 	}
 
-	return WalkResult{Dir: pathStr, Entries: dirs}, true, nil
+	return WalkResult{Dir: path, Entries: dirs}, true, nil
 }
 
 // visitSym is visit's counterpart for followLinks: same item type, same
@@ -348,16 +267,11 @@ func (w *Walkman) visitSym(
 	spawn func(walkItem),
 ) (WalkResult, bool, error) {
 
-	worker := &w.workers[workerID]
-	worker.pathBuf, worker.offsets = computePath(item.leaf, worker.pathBuf, worker.offsets)
-	// copy made: this copy is sent as result
-	pathStr := string(worker.pathBuf)
-	// view into the byte buffer: for local calls to function that accept a string
-	pathView := byteToStringNoCopy(worker.pathBuf)
+	path := item.leaf.path
 
-	dirs, err := readDir(pathView)
+	dirs, err := readDir(path)
 	if err != nil {
-		return WalkResult{Dir: pathStr, Errs: []DirErr{{Name: pathStr, Err: err}}}, true, nil
+		return WalkResult{Dir: path, Errs: []DirErr{{Name: path, Err: err}}}, true, nil
 	}
 
 	before := len(dirs)
@@ -367,18 +281,19 @@ func (w *Walkman) visitSym(
 	}
 
 	// Err field is nil until the first problem, which is the common case
-	result := WalkResult{Dir: pathStr, Entries: dirs}
+	result := WalkResult{Dir: path, Entries: dirs}
 
 	// We do a syscall for dirkey only once per directory.
 	// The rest of the symlinks just reuse those dirkey values
+	worker := &w.workers[workerID]
 	ancestorsResolved := false
 
 	hasCycle := func(k dirKey) bool {
 		if !ancestorsResolved {
 			ancestorsResolved = true
 			worker.dirBuf = worker.dirBuf[:0]
-			for _, end := range worker.offsets {
-				nk, err := statKey(byteToStringNoCopy(worker.pathBuf[:end]))
+			for n := item.leaf; n != nil; n = n.parent {
+				nk, err := statKey(n.path)
 				if err != nil {
 					continue
 				}
@@ -405,7 +320,7 @@ func (w *Walkman) visitSym(
 	for i := 0; i < len(dirs); {
 		entry := dirs[i]
 
-		// childPath := join(item.path, entry.Name())
+		childPath := w.newPath(workerID, path, entry.Name())
 
 		mode := entry.Type()
 		isDir := mode.IsDir()
@@ -414,8 +329,7 @@ func (w *Walkman) visitSym(
 		if isSymlink {
 			// followLinks is on, so a symlink is classified by what it
 			// resolves to. One os.Stat resolves the whole chain
-			leafBuf := joinLeaf(worker.pathBuf, stringTobyteNoCopy(entry.Name()))
-			info, err := os.Stat(byteToStringNoCopy(leafBuf))
+			info, err := os.Stat(childPath)
 			if err != nil {
 				// Dangling/unresolvable symlink. Report via the err slice so
 				// users can easily distingish them
@@ -472,7 +386,7 @@ func (w *Walkman) visitSym(
 
 		spawn(walkItem{
 			depth: item.depth + 1,
-			leaf:  &pathNode{name: entry.Name(), parent: item.leaf},
+			leaf:  &pathNode{path: childPath, parent: item.leaf},
 		})
 		i++
 	}
@@ -495,7 +409,7 @@ func (w *Walkman) Walk(root string) <-chan WalkResult {
 	root = filepath.Clean(root)
 
 	// parent is nil for the first walkItem
-	w.pool.Submit(walkItem{depth: 0, leaf: &pathNode{name: root}})
+	w.pool.Submit(walkItem{depth: 0, leaf: &pathNode{path: root}})
 	return w.pool.Run()
 }
 
