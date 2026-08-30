@@ -419,7 +419,7 @@ func (w *Walkman) Walk(root string) <-chan WalkResult {
 	root = filepath.Clean(root)
 
 	// parent is nil for the first walkItem
-	w.pool.Submit(walkItem{depth: 0, leaf: &pathNode{path: root}})
+	w.pool.Submit(walkItem{depth: 1, leaf: &pathNode{path: root}})
 	return w.pool.Run()
 }
 

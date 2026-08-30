@@ -30,7 +30,7 @@
 - Streaming results through a channel, one `WalkResult` per directory
 - Per-directory error reporting that doesn't abort unrelated work
 - Skip entries by name (prunes matching directories), optional max depth, optional symlink following
-- Benchmark suite vs Rust's parallel `ignore::WalkParallel`, on the linux kernel source tree.
+- Benchmark suite vs Rust's parallel `ignore::WalkParallel`, on the linux kernel source tree (or any other).
 
 ## Installation
 
@@ -72,7 +72,7 @@ func main() {
 }
 ```
 
-> **Drain before you wait.** `Walk`'s channel stays open until all queued work completes — consume it fully, then call `Wait()` for the terminal pool error. Per-entry errors live inside `WalkResult.Errs` and don't abort the rest of the traversal — a directory can list successfully (`Entries` populated) while individual entries inside it (a dangling symlink, a detected cycle) still show up as their own `DirErr`.
+> **Drain before you wait.** `Walk`'s channel stays open until all queued work completes, consume it fully then call `Wait()` for the terminal pool error. Per-entry errors live inside `WalkResult.Errs` and don't abort the rest of the traversal. A directory can list successfully (`Entries` populated) while individual entries inside it (a dangling symlink, a detected cycle) still show up as their own `DirErr`.
 
 ## API
 
@@ -121,7 +121,7 @@ Child directories are scheduled as separate tasks, not included in `Entries`. `E
 func (w *Walkman) Wait() error
 ```
 
-Blocks until the pool finishes; returns the first fatal pool-level error.
+Blocks until the pool finishes, returns the first fatal pool-level error.
 
 ## Traversal semantics
 
@@ -180,7 +180,7 @@ cd rust_ignore_parallel && cargo build --release    # produces build/ignore-para
 
 ## Benchmarks
 
-`walkman` (Go) vs Rust's parallel `ignore::WalkParallel` (the ripgrep walker), walking a real-world tree instead of a synthetic one: the **Linux kernel source** (`linux-7.2.2`, 6,203 dirs / 94,757 files / 99 symlinks), on an Intel i5-1135G7 (4C/8T). Workers swept at 1/2/4/8, `hyperfine --min-runs 10 --warmup 5` for wall-clock, `perf stat` in parallel for scheduling/cache behavior. Run twice — once plain, once with `--follow-links` — via `run_all.sh` / `run_all_sym.sh`.
+`walkman` (Go) vs Rust's parallel `ignore::WalkParallel` (the ripgrep walker), walking a real-world tree instead of a synthetic one: the **Linux kernel source** (`linux-7.2.2`, 6,203 dirs / 94,757 files / 99 symlinks), on an Intel i5-1135G7 (4C/8T). Workers swept at 1/2/4/8, `hyperfine --min-runs 10 --warmup 5` for wall-clock, `perf stat` in parallel for scheduling/cache behavior. Run twice: once plain, once with `--follow-links` via `run_all.sh` / `run_all_sym.sh`.
 
 **Wall-clock mean (`hyperfine`):**
 
@@ -214,7 +214,7 @@ walkman is faster at every worker count in both modes, with the biggest margins 
 
 Even at 1 worker, walkman racks up thousands of context switches (Go's goroutine/channel machinery runs regardless of worker count) against `ignore`'s near-zero — and pays for it in higher cache-misses at every worker count. It still wins on wall-clock because it executes fewer total instructions throughout: the core traversal path is leaner even though the concurrency scaffolding around it isn't free. CPU migrations tell a related story at 8 workers — walkman averages 85 vs `ignore`'s 3, i.e. Go's scheduler bounces goroutines across cores far more than `ignore`'s threads, which is the likely source of walkman's tapering (not zero) efficiency.
 
-**A caveat on noise:** run-to-run variance isn't even across configs. 1- and 2-worker runs are stable (σ ≈ 4-5 ms) for both tools, so those comparisons are solid. 4- and 8-worker runs are noisier — walkman @ 4 workers had one outlier run (task-clock spiking to 238ms vs a ~110ms baseline, σ ≈ 13ms overall), and `ignore` @ 8 workers ranged from 19.4ms to 42.1ms wall time across its 10 runs (σ ≈ 8.5ms). Treat the 4-worker result in particular as the least conclusive of the four.
+**A caveat on noise:** run-to-run variance isn't even across configs. 1- and 2-worker runs are stable (σ ≈ 4-5 ms) for both tools, so those comparisons are solid. 4- and 8-worker runs are noisier, walkman @ 4 workers had one outlier run (task-clock spiking to 238ms vs a ~110ms baseline, σ ≈ 13ms overall), and `ignore` @ 8 workers ranged from 19.4ms to 42.1ms wall time across its 10 runs (σ ≈ 8.5ms). Treat the 4-worker result in particular as the least conclusive of the four.
 
 Reproduce with:
 
@@ -255,7 +255,7 @@ Covers empty/flat directories, equivalence with `filepath.WalkDir`, skip-list pr
 
 Deliberately deferred so far:
 
-- Deterministic/sorted and breadth-first output
+- Deterministic/sorted and breadth-first output (layered on top of the base walker)
 - `fs.FS`-based traversal
 
 ## Project layout
@@ -274,7 +274,6 @@ walkman/
 │   ├── perf_bench.sh               # perf-counter sweep
 │   ├── run_all.sh                  # runs both harnesses across all three shapes
 │   ├── run_all_sym.sh              # symlink-focused counterpart (--follow-links, cycles)
-└── Roadmap.md                      # feature roadmap / implementation notes
 ```
 
 ## License
