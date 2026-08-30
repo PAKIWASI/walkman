@@ -30,8 +30,7 @@
 - Streaming results through a channel, one `WalkResult` per directory
 - Per-directory error reporting that doesn't abort unrelated work
 - Skip entries by name (prunes matching directories), optional max depth, optional symlink following
-- Zero-overhead core walker (metrics and counts computed directly in the consumer loop with zero atomics)
-- Benchmark suite vs Rust's parallel `ignore::WalkParallel`, with a synthetic tree generator across wide/deep/mixed shapes — see [Benchmarks](#benchmarks)
+- Benchmark suite vs Rust's parallel `ignore::WalkParallel`, on the linux kernel source tree.
 
 ## Installation
 
@@ -181,48 +180,41 @@ cd rust_ignore_parallel && cargo build --release    # produces build/ignore-para
 
 ## Benchmarks
 
-`walkman` (Go) vs Rust's parallel `ignore::WalkParallel` (the ripgrep walker), across three synthetic tree shapes, Intel i5-1135G7 (4C/8T). Rust's *sequential* `walkdir` crate isn't in the repo anymore — walkman beat it decisively and consistently in every early run, which stopped being interesting once `ignore::WalkParallel` was in the mix as the real competitor.
+`walkman` (Go) vs Rust's parallel `ignore::WalkParallel` (the ripgrep walker), walking a real-world tree instead of a synthetic one: the **Linux kernel source** (`linux-7.2.2`, 6,203 dirs / 94,757 files / 99 symlinks), on an Intel i5-1135G7 (4C/8T). Workers swept at 1/2/4/8, `hyperfine --min-runs 10 --warmup 5` for wall-clock, `perf stat` in parallel for scheduling/cache behavior. Run twice — once plain, once with `--follow-links` — via `run_all.sh` / `run_all_sym.sh`.
 
-| Shape | Dirs | Files | What it stresses |
-| --- | ---: | ---: | --- |
-| `wide` | 1,884 | 11,304 | shallow, high branching — lots of independent, stealable work |
-| `deep` | 16,382 | 32,764 | deep, low branching — long dependency chains, little to steal |
-| `mixed` | 19,530 | 78,120 | moderate depth/branching — closer to a real source tree |
+**Wall-clock mean (`hyperfine`):**
 
-There's also a symlink-focused sweep (`run_all_sym.sh`) that builds the same three shapes with 200 symlinks scattered in (including deliberate cycles) and benchmarks both CLIs with `--follow-links` on, to exercise the cycle-detection path rather than just the plain walk.
+| Workers | walkman | ignore | walkman (symlinks) | ignore (symlinks) |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | **72.8 ms** | 96.3 ms | **81.3 ms** | 108.6 ms |
+| 2 | **41.8 ms** | 46.6 ms | **50.2 ms** | 49.3 ms |
+| 4 | **27.1 ms** | 29.3 ms | **30.1 ms** | 29.3 ms |
+| 8 | **21.7 ms** | 29.0 ms | **22.9 ms** | 27.7 ms |
 
-**Wall-clock mean, ms (`hyperfine`, full process per run, `--min-runs 10 --warmup 5`):**
+walkman is faster at every worker count in both modes, with the biggest margins at 1 worker (~1.3x) and 8 workers (~1.3-1.4x); the 4-worker gap is the narrowest and — per the `perf` runs below — the least statistically clean.
 
-*No symlinks:*
+**Scaling (speedup relative to each tool's own 1-worker time, no symlinks):**
 
-| Workers | `wide` walkman | `wide` ignore | `deep` walkman | `deep` ignore | `mixed` walkman | `mixed` ignore |
+| Workers | walkman speedup | walkman efficiency | ignore speedup | ignore efficiency |
+| ---: | ---: | ---: | ---: | ---: |
+| 2 | 1.74x | 87% | 2.07x | 103% |
+| 4 | 2.69x | 67% | 3.28x | 82% |
+| 8 | 3.36x | 42% | 3.32x | 42% |
+
+`ignore` scales more efficiently from 1→4 workers, but flatlines from 4→8 (3.28x → 3.32x, essentially no gain). `walkman` scales less efficiently early on but keeps improving through 8 workers, which is why it re-opens a lead there instead of hitting a wall.
+
+**Scheduling & memory behavior (`perf stat`, mean of 10 runs, no symlinks):**
+
+| Workers | walkman ctx-switches | ignore ctx-switches | walkman cache-misses | ignore cache-misses | walkman instructions | ignore instructions |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | **15.0** | 22.4 | 88.9 | **81.4** | 114.0 | **103.6** |
-| 4 | **5.9** | 9.9 | 31.7 | **24.3** | 41.4 | **29.3** |
-| 8 | **8.6** | 9.4 | **24.7** | 27.2 | 31.6 | **27.5** |
+| 1 | 6,400 | 2 | 711K | 450K | 437M | 463M |
+| 2 | 3,162 | 18 | 746K | 463K | 406M | 466M |
+| 4 | 1,624 | 58 | 816K | 510K | 397M | 470M |
+| 8 | 604 | 106 | 793K | 495K | 403M | 475M |
 
-*With `--follow-links` (200 symlinks/tree, cycles included):*
+Even at 1 worker, walkman racks up thousands of context switches (Go's goroutine/channel machinery runs regardless of worker count) against `ignore`'s near-zero — and pays for it in higher cache-misses at every worker count. It still wins on wall-clock because it executes fewer total instructions throughout: the core traversal path is leaner even though the concurrency scaffolding around it isn't free. CPU migrations tell a related story at 8 workers — walkman averages 85 vs `ignore`'s 3, i.e. Go's scheduler bounces goroutines across cores far more than `ignore`'s threads, which is the likely source of walkman's tapering (not zero) efficiency.
 
-| Workers | `wide` walkman | `wide` ignore | `deep` walkman | `deep` ignore | `mixed` walkman | `mixed` ignore |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | **19.6** | 22.0 | 106.9 | **88.0** | 139.6 | **109.3** |
-| 4 | **7.8** | 12.6 | 38.5 | **25.1** | 45.6 | **31.4** |
-| 8 | **10.6** | 11.1 | **29.4** | 23.3 | 34.2 | **27.6** |
-
-Takeaways:
-- **`wide`** — walkman wins outright at every worker count, symlinks or not.
-- **`deep`/`mixed`** — `ignore` is ahead at 1–4 workers; on `deep` walkman catches up and wins by 8 workers, on `mixed` `ignore` stays ahead throughout.
-- **Known anomaly:** on `wide` with symlinks, walkman gets *slower* going from 4→8 workers (7.8ms → 10.6ms), reproduced across two independent runs with tight variance (not noise). No such regression on the no-symlinks `wide` sweep. Likely contention in the cycle-detection path under 8-way concurrency on a shallow tree; not yet root-caused.
-
-**Allocation pressure (`perf stat`, workers=1, mean of 10 runs, no symlinks):**
-
-| Shape | walkman page-faults | ignore page-faults | walkman cache-misses | ignore cache-misses |
-| --- | ---: | ---: | ---: | ---: |
-| `wide` | 169 | 111 | 248K | 126K |
-| `deep` | 401 | 111 | 671K | 452K |
-| `mixed` | 491 | 112 | 1.04M | 776K |
-
-walkman faults and cache-misses more than `ignore` at every shape, and the gap widens with tree size. Likely explanation for `ignore` pulling ahead as trees get deeper/wider: whatever allocation `walkman` does per directory doesn't stay flat.
+**A caveat on noise:** run-to-run variance isn't even across configs. 1- and 2-worker runs are stable (σ ≈ 4-5 ms) for both tools, so those comparisons are solid. 4- and 8-worker runs are noisier — walkman @ 4 workers had one outlier run (task-clock spiking to 238ms vs a ~110ms baseline, σ ≈ 13ms overall), and `ignore` @ 8 workers ranged from 19.4ms to 42.1ms wall time across its 10 runs (σ ≈ 8.5ms). Treat the 4-worker result in particular as the least conclusive of the four.
 
 Reproduce with:
 
@@ -231,49 +223,23 @@ cd test
 ./run_all.sh \
   --walkman          ../build/main \
   --ignore-parallel  ../build/ignore-parallel-cli \
-  --workers          "1,4,$(nproc)" \
+  --tree             /path/to/linux-7.2.2 \
+  --workers          "1,2,4,$(nproc)" \
   --runs             10 \
+  --warmup           5 \
   --out-dir          bench_results
 
 ./run_all_sym.sh \
   --walkman          ../build/main \
   --ignore-parallel  ../build/ignore-parallel-cli \
-  --workers          "1,4,$(nproc)" \
+  --tree             /path/to/linux-7.2.2 \
+  --workers          "1,2,4,$(nproc)" \
   --runs             10 \
-  --links            200 \
+  --warmup           5 \
   --out-dir          bench_results_symlinks
 ```
 
-Or run one shape/harness at a time with `build_tree.sh` + `bench_harness.sh` (hyperfine) / `perf_bench.sh` (perf counters). See each script's `--help`.
-
-## Comparison: walkman vs ignore
-
-| Aspect | `walkman` (Go) | `ignore::WalkParallel` (Rust) |
-| --- | --- | --- |
-| **Delivery Model** | **Directory-batched streaming** (`<-chan WalkResult`) | **Entry-level parallel visitor** (`ParallelVisitor` callback) |
-| **Consumer Execution** | Single-goroutine stream consumption | Concurrent in-thread callbacks across worker threads |
-| **Directory Context** | Complete `[]fs.DirEntry` slice per directory | Dispersed individual file/dir entries |
-| **Memory / Allocations** | Per-directory slice allocations & channel buffers | In-place buffer reuse, minimal heap churn |
-| **Best-fit Workloads** | Wide trees, directory-level indexing/aggregation | Deep trees, file-level filtering/grep searching |
-
-### Strengths & Weaknesses
-
-#### `walkman`
-- **Strengths:**
-  - **Directory-level autonomy:** Caller receives all entries of a directory together, making folder-level aggregation, custom batch filtering, and batch I/O simple without cross-thread coordination.
-  - **Wide-tree throughput:** Work-stealing pool keeps all CPU cores saturated on wide, shallow trees, consistently beating `ignore` across worker counts.
-  - **Clean consumer consumption:** Channel-based consumption eliminates mutex and atomic contention in consumer code.
-- **Weaknesses:**
-  - **Allocation & channel overhead:** Streaming per-directory slices across channels increases page faults and cache misses on deep/narrow trees.
-  - **Completion-ordered:** Results arrive non-deterministically as directory tasks complete.
-
-#### `ignore`
-- **Strengths:**
-  - **Minimal memory pressure:** Reuses thread-local buffers, resulting in fewer page faults and lower cache misses on deep and mixed trees.
-  - **Optimized for item filtering:** Built for ripgrep-style search where individual files are filtered independently inside worker threads.
-- **Weaknesses:**
-  - **No directory batching:** Does not expose whole directory contents at once; grouping entries by directory requires user-managed thread synchronization.
-  - **Thread-safety burden:** Aggregation or counting in caller code must be synchronized across worker threads (e.g. via atomics or mutexes).
+Both scripts write a `run_manifest.txt` (host/CPU/tree metadata) alongside `hyperfine.csv` and `perf.csv` in `--out-dir`, so results stay traceable to the tree and machine they came from. Run the harnesses individually with `bench_harness.sh` (hyperfine) / `perf_bench.sh` (perf counters) — see each script's `--help`.
 
 ## Testing
 
@@ -289,12 +255,8 @@ Covers empty/flat directories, equivalence with `filepath.WalkDir`, skip-list pr
 
 Deliberately deferred so far:
 
-- Deterministic/sorted or breadth-first output
-- `iter.Seq`-based iteration, `FilterEntry`-style filtering, `ContentsFirst` ordering
-- A cap on simultaneously open directories
+- Deterministic/sorted and breadth-first output
 - `fs.FS`-based traversal
-
-Ordering/scheduling policy is kept out of the core walker on purpose: sorted or BFS output needs buffering, which belongs above the streaming core, not inside it.
 
 ## Project layout
 
@@ -308,13 +270,10 @@ walkman/
 ├── rust_ignore_parallel/src/main.rs # comparable Rust ignore::WalkParallel wrapper
 ├── build/                          # built binaries (main, ignore-parallel-cli)
 ├── test/
-│   ├── build_tree.sh               # synthetic tree generator (wide/deep/mixed)
 │   ├── bench_harness.sh            # hyperfine wall-clock sweep
 │   ├── perf_bench.sh               # perf-counter sweep
 │   ├── run_all.sh                  # runs both harnesses across all three shapes
 │   ├── run_all_sym.sh              # symlink-focused counterpart (--follow-links, cycles)
-│   ├── bench_results/              # recorded CSVs + run_manifest.txt (no symlinks)
-│   └── bench_results_symlinks/     # recorded CSVs + run_manifest.txt (--follow-links)
 └── Roadmap.md                      # feature roadmap / implementation notes
 ```
 
