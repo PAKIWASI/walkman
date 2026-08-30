@@ -24,7 +24,7 @@ var (
 type walkConf struct {
 	followLinks bool   // off by default
 	maxDepth    uint32 // 0 means unlimited
-	skipSet     map[string]struct{}
+	skipSet     map[string]struct{} // directories/files to skip from the result
 }
 
 // DirErr is one error encountered while producing a WalkResult.
@@ -40,7 +40,7 @@ type DirErr struct {
 // Ret and Err are not mutually exclusive: a directory can list
 // successfully (Ret populated) while individual entries inside it still
 // had problems (e.g. one dangling symlink, one detected cycle), each
-// recorded as its own ItemErr in Err alongside the otherwise-complete Ret.
+// recorded as its own ItemErr in Err alongside the otherwise complete Ret.
 // Ret is nil only when the directory itself couldn't be read at all, in
 // which case Err holds exactly that one failure.
 type WalkResult struct {
@@ -49,13 +49,19 @@ type WalkResult struct {
 	Errs    []DirErr
 }
 
+// walkItem is the input to each worker's Task function
+// each worker get's one of these and do the work on it and then spawn
+// more work (if needed) by creating another walkItem
 type walkItem struct {
 	depth uint32
 	leaf  *pathNode
 }
 
+// pathNode is a linked list that goes from any walkItem (anything in the filesystem tree)
+// to it's parent node and also stores the full path (starting from root) upto that node
+// used as path storage as well as to detect symlinks (Lstat each path as we go up the chain)
 type pathNode struct {
-	path    string
+	path   string
 	parent *pathNode
 }
 
@@ -79,7 +85,7 @@ func statKey(path string) (dirKey, error) {
 	return dirKey{dev: uint64(st.Dev), ino: st.Ino}, nil
 }
 
-// PoolConfig exposes the underlying worker-pool knobs
+// PoolConfig exposes the underlying workerpool knobs
 type PoolConfig struct {
 	PoolSize         int
 	InitialWorkerCap int
@@ -93,19 +99,22 @@ type PoolConfig struct {
 func DefaultPoolConfig() PoolConfig {
 	return PoolConfig{
 		PoolSize:         runtime.GOMAXPROCS(0),
-		InitialWorkerCap: 32, // TODO: experiment with these numbers
+		InitialWorkerCap: 32,
 		ResultBuffSize:   128,
 	}
 }
 
 type WorkerState struct {
+	// scratch space for symlink detection
 	dirBuf    []dirKey
+	// Storage for all paths this worker computed
 	pathStore StringStore
 }
 
 type Walkman struct {
-	conf    walkConf
-	pool    *wsp.WorkerPool[walkItem, WalkResult]
+	conf walkConf
+	pool *wsp.WorkerPool[walkItem, WalkResult]
+	// per-worker state keyed by workerID
 	workers []WorkerState
 }
 
@@ -138,8 +147,12 @@ func NewWalkmanWithConfig(
 	}
 
 	w.workers = make([]WorkerState, pc.PoolSize)
+	if !w.conf.followLinks {
+		for i := range w.workers {
+			w.workers[i].dirBuf = make([]dirKey, 16)
+		}
+	}
 	for i := range w.workers {
-		w.workers[i].dirBuf = make([]dirKey, 16)
 		w.workers[i].pathStore = NewPathStorage(0)
 	}
 
@@ -190,8 +203,8 @@ func filterSkipped(dirs []fs.DirEntry, skip map[string]struct{}) []fs.DirEntry {
 	return dirs[:n]
 }
 
+// Stores a path in this worker's storage and returns a slice to it
 func (w *Walkman) newPath(workerID int, parent, child string) string {
-
 	id := w.workers[workerID].pathStore.StorePath(parent, child)
 	return id.String()
 }
@@ -244,7 +257,7 @@ func (w *Walkman) visit(
 
 		spawn(walkItem{
 			depth: item.depth + 1,
-			leaf: &pathNode{path: w.newPath(workerID, path, entry.Name()), parent: item.leaf},
+			leaf:  &pathNode{path: w.newPath(workerID, path, entry.Name()), parent: item.leaf},
 		})
 	}
 
