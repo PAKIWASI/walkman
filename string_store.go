@@ -47,8 +47,11 @@ func (p *StringStore) Store(str string) StringID {
 	c := cap(p.buf)
 	id := StringID{store: p, off: p.off, len: s}
 	if s > 0 {
-		if p.off+s >= c {
-			p.buf = slices.Grow(p.buf, 2*c+s)
+		if p.off+s > len(p.buf) {
+			if p.off+s >= c {
+				p.buf = slices.Grow(p.buf, 2*c+s)
+			}
+			p.buf = p.buf[:p.off+s]
 		}
 
 		copy(p.buf[p.off:p.off+s], str)
@@ -70,8 +73,11 @@ func (p *StringStore) StorePath(parent, child string) StringID {
 	total := plen + sep + clen
 
 	c := cap(p.buf)
-	if p.off+total >= c {
-		p.buf = slices.Grow(p.buf, 2*c+total)
+	if p.off+total > len(p.buf) {
+		if p.off+total >= c {
+			p.buf = slices.Grow(p.buf, 2*c+total)
+		}
+		p.buf = p.buf[:p.off+total]
 	}
 
 	id := StringID{store: p, off: p.off, len: total}

@@ -89,15 +89,12 @@ type PoolConfig struct {
 // DefaultPoolConfig matches PoolSize to GOMAXPROCS. Per the workstealpool
 // README's own benchmarks: speedup on a CPU-bound divide-and-conquer
 // workload tracks physical/logical core count and then plateaus right at
-// GOMAXPROCS, with a slight regression going meaningfully past it
-// (oversubscription). InitialWorkerCap/ResultBuffSize matter far less
-// (a few hundred µs across their whole sweep). 32/64 here just matches
-// the fixed baseline used across their other sweeps, not a walking-specific finding
+// GOMAXPROCS, with a slight regression going meaningfully past it (oversubscription).
 func DefaultPoolConfig() PoolConfig {
 	return PoolConfig{
 		PoolSize:         runtime.GOMAXPROCS(0),
 		InitialWorkerCap: 32, // TODO: experiment with these numbers
-		ResultBuffSize:   256,
+		ResultBuffSize:   128,
 	}
 }
 
