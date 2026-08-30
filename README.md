@@ -3,6 +3,7 @@
 **A concurrent filesystem walker for Go, powered by work stealing.**
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/PAKIWASI/walkman.svg)](https://pkg.go.dev/github.com/PAKIWASI/walkman)
+[Work Steal](https://github.com/PAKIWASI/workstealpool)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 > **Status:** experimental / actively evolving. Core walker, tests, and benchmarks are in place; API not yet stable.
@@ -19,10 +20,9 @@
 - [How it works](#how-it-works)
 - [CLI tools](#cli-tools)
 - [Benchmarks](#benchmarks)
-- [Comparison: walkman vs ignore](#comparison-walkman-vs-ignore)
 - [Testing](#testing)
-- [Limitations / roadmap](#limitations--roadmap)
-- [Project layout](#project-layout)
+- [Roadmap](#roadmap)
+- [LLM Usage](#llm-usage)
 
 ## Features
 
@@ -245,37 +245,25 @@ Both scripts write a `run_manifest.txt` (host/CPU/tree metadata) alongside `hype
 
 ```bash
 go test ./...              # full suite
-go test -race ./...        # race detector
 go test -bench=. -benchmem ./...
 ```
 
 Covers empty/flat directories, equivalence with `filepath.WalkDir`, skip-list pruning, max-depth, symlinks (following, broken links), permission errors, counts accuracy, consistency across worker counts, and worker parking/wake/termination behavior.
 
-## Limitations / roadmap
+### What's wrong with test -race
 
-Deliberately deferred so far:
+The race detector flags a harmless race condition in workstealpool's deque logic. Details in [workstealpool/README.md](https://github.com/PAKIWASI/workstealpool/blob/main/README.md)
+
+
+## Roadmap
 
 - Deterministic/sorted and breadth-first output (layered on top of the base walker)
 - `fs.FS`-based traversal
 
-## Project layout
+## LLM Usage
 
-```text
-walkman/
-├── walkman.go                      # core concurrent walker
-├── walkman_test.go                 # correctness + concurrency tests
-├── walkman_bench_test.go           # benchmark suite
-├── walkman_worker_sweep_test.go    # WorkerSweep benchmark (benchstat-friendly)
-├── main/main.go                    # Go CLI / benchmark wrapper
-├── rust_ignore_parallel/src/main.rs # comparable Rust ignore::WalkParallel wrapper
-├── build/                          # built binaries (main, ignore-parallel-cli)
-├── test/
-│   ├── bench_harness.sh            # hyperfine wall-clock sweep
-│   ├── perf_bench.sh               # perf-counter sweep
-│   ├── run_all.sh                  # runs both harnesses across all three shapes
-│   ├── run_all_sym.sh              # symlink-focused counterpart (--follow-links, cycles)
-```
+All walkman and workstealpool code is my own. LLM was used to write the rust ignore cli wrapper for benchmarking.
+Also used for basic tests (with alot of modifications afterwards), analysing benchmark output and populating the README's benchmark section.
 
-## License
 
-[MIT](LICENSE)
+

@@ -312,11 +312,11 @@ func TestWalk_MaxDepth_StopsDescending(t *testing.T) {
 		"d1/shallow.txt",
 	})
 
-	// maxDepth=1: root (depth 0) is walked, and its direct child dirs
-	// (depth 1, i.e. "d1") are walked, but "d1"'s subdirectories (depth
-	// 2, "d2") are not recursed into - though "d2" still shows up as an
+	// maxDepth=2: root (depth 1) is walked, and its direct child dirs
+	// (depth 2, i.e. "d1") are walked, but "d1"'s subdirectories (depth
+	// 3, "d2") are not recursed into - though "d2" still shows up as an
 	// entry inside d1's own listing.
-	w := NewWalkman(false, 1, nil)
+	w := NewWalkman(false, 2, nil)
 	results, err := drain(t, w, root)
 	if err != nil {
 		t.Fatalf("Wait() = %v, want nil", err)
@@ -988,7 +988,7 @@ func TestWalk_Symlink_SiblingDirsNoFalseCycle(t *testing.T) {
 		t.Fatalf("Symlink: %v", err)
 	}
 
-	w := NewWalkman(true, 2, nil) // cap depth so c -> d -> c (via file only, no back-link) can't recurse forever regardless
+	w := NewWalkman(true, 3, nil) // cap depth so c -> d -> c (via file only, no back-link) can't recurse forever regardless
 	_, err := drain(t, w, root)
 	if err != nil {
 		t.Fatalf("Wait() = %v, want nil for a non-cyclic cross-link", err)
@@ -1379,4 +1379,3 @@ func TestWalk_SkipList_AgreesWithSequentialCount(t *testing.T) {
 			gotFiles, gotDirs, wantFiles, wantDirs, len(skipList), total)
 	}
 }
-
