@@ -14,14 +14,6 @@ import (
 	wsp "github.com/PAKIWASI/workstealpool"
 )
 
-const (
-	// how many of input's subdirs to check in case there are non-zero subdirs
-	maxInlineDirs = 3
-	// how many recursive calls to make to input's subdirs to check
-	// for a subdir with no subdirs or one with <= maxDirInline
-	maxInlineDepth = 1
-)
-
 // Sentinel errors reported via WalkResult.Err
 var (
 	errSymlinkCycle    = errors.New("walkman: symlink cycle")
@@ -117,8 +109,6 @@ type WorkerState struct {
 	dirBuf    []dirKey
 	// Storage for all paths this worker computed
 	pathStore StringStore
-	// cache for dirs to process recursivly instead of spawn()
-	inlineDirs [maxInlineDirs*maxInlineDepth]fs.DirEntry
 }
 
 type Walkman struct {
@@ -240,49 +230,23 @@ func (w *Walkman) visit(
 	}
 
 	before := len(dirs)
-
 	if len(w.conf.skipSet) != 0 && before != 0 {
 		dirs = filterSkipped(dirs, w.conf.skipSet)
 	}
 
     result := WalkResult{Dir: path, Entries: dirs}
 
-	inlineDirSlice := w.workers[workerID].inlineDirs[:0]
-
-    childDirCount := 0
-	inlineDepth := 0
-	inlineDirs := 0
-    if w.conf.maxDepth == 0 || item.depth+1 <= w.conf.maxDepth {
-        for i := range dirs {
-            mode := dirs[i].Type()
-			// if it's not a directory then it's a file or symlink
-			// we dont process symlinks in this function
-            if mode.IsDir() && childDirCount < maxInlineDirs {
-				inlineDirSlice[childDirCount] = dirs[i]
-                childDirCount++
-            }
-        }
-    }
-
-    if childDirCount == 0 {
-        return result, true, nil
-    }
-
-
-
 	for i := range dirs {
 		entry := dirs[i]
 
 		mode := entry.Type()
-		isDir := mode.IsDir()
-		isSymlink := mode&fs.ModeSymlink != 0
 
 		// this Task never follows symlinks
-		if isSymlink {
+		if mode&fs.ModeSymlink != 0 {
 			continue
 		}
 
-		if !isDir {
+		if mode.IsDir() {
 			continue
 		}
 
@@ -313,14 +277,12 @@ func (w *Walkman) visitSym(
 ) (WalkResult, bool, error) {
 
 	path := item.leaf.path
-
 	dirs, err := readDir(path)
 	if err != nil {
 		return WalkResult{Dir: path, Errs: []DirErr{{Name: path, Err: err}}}, true, nil
 	}
 
 	before := len(dirs)
-
 	if len(w.conf.skipSet) != 0 && before != 0 {
 		dirs = filterSkipped(dirs, w.conf.skipSet)
 	}
