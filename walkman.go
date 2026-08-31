@@ -14,6 +14,14 @@ import (
 	wsp "github.com/PAKIWASI/workstealpool"
 )
 
+const (
+	// how many of input's subdirs to check in case there are non-zero subdirs
+	maxInlineDirs = 3
+	// how many recursive calls to make to input's subdirs to check
+	// for a subdir with no subdirs or one with <= maxDirInline
+	maxInlineDepth = 1
+)
+
 // Sentinel errors reported via WalkResult.Err
 var (
 	errSymlinkCycle    = errors.New("walkman: symlink cycle")
@@ -109,6 +117,8 @@ type WorkerState struct {
 	dirBuf    []dirKey
 	// Storage for all paths this worker computed
 	pathStore StringStore
+	// cache for dirs to process recursivly instead of spawn()
+	inlineDirs [maxInlineDirs*maxInlineDepth]fs.DirEntry
 }
 
 type Walkman struct {
@@ -212,7 +222,7 @@ func (w *Walkman) newPath(workerID int, parent, child string) string {
 // visit is the Task run for every directory the walk encounters. It is
 // called concurrently, from any worker in the pool for different items,
 // so it must not touch anything on Walkman that isn't safe for that
-// (conf is read-only after construction).
+// (conf is read-only after construction)
 func (w *Walkman) visit(
 	_ context.Context,
 	workerID int,
@@ -234,6 +244,31 @@ func (w *Walkman) visit(
 	if len(w.conf.skipSet) != 0 && before != 0 {
 		dirs = filterSkipped(dirs, w.conf.skipSet)
 	}
+
+    result := WalkResult{Dir: path, Entries: dirs}
+
+	inlineDirSlice := w.workers[workerID].inlineDirs[:0]
+
+    childDirCount := 0
+	inlineDepth := 0
+	inlineDirs := 0
+    if w.conf.maxDepth == 0 || item.depth+1 <= w.conf.maxDepth {
+        for i := range dirs {
+            mode := dirs[i].Type()
+			// if it's not a directory then it's a file or symlink
+			// we dont process symlinks in this function
+            if mode.IsDir() && childDirCount < maxInlineDirs {
+				inlineDirSlice[childDirCount] = dirs[i]
+                childDirCount++
+            }
+        }
+    }
+
+    if childDirCount == 0 {
+        return result, true, nil
+    }
+
+
 
 	for i := range dirs {
 		entry := dirs[i]
@@ -261,7 +296,7 @@ func (w *Walkman) visit(
 		})
 	}
 
-	return WalkResult{Dir: path, Entries: dirs}, true, nil
+	return result, true, nil
 }
 
 // visitSym is visit's counterpart for followLinks: same item type, same
