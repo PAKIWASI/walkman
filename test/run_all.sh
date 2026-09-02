@@ -34,6 +34,7 @@ set -euo pipefail
 
 WALKMAN_BIN=""
 IGNORE_PARALLEL_BIN=""
+FASTWALK_BIN=""
 TREE=""
 WORKERS="1,2,4,$(nproc 2>/dev/null || echo 4)"
 RUNS=10
@@ -47,6 +48,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --walkman) WALKMAN_BIN="$2"; shift 2 ;;
     --ignore-parallel) IGNORE_PARALLEL_BIN="$2"; shift 2 ;;
+    --fastwalk) FASTWALK_BIN="$2"; shift 2 ;;
     --tree)    TREE="$2"; shift 2 ;;
     --workers) WORKERS="$2"; shift 2 ;;
     --runs)    RUNS="$2"; shift 2 ;;
@@ -72,11 +74,15 @@ if [[ "$QUICK" -eq 1 ]]; then
   [[ "$WARMUP" == 5 ]] && WARMUP=2
 fi
 
-for req in WALKMAN_BIN IGNORE_PARALLEL_BIN TREE; do
-  if [[ -z "${!req}" ]]; then
-    echo "missing required --${req,,} (see --help)" >&2; exit 1
-  fi
-done
+if [[ -z "$TREE" ]]; then
+  echo "error: --tree $TREE is required" >&2
+  exit 1
+fi
+
+if [[ -z "$WALKMAN_BIN" && -z "$IGNORE_PARALLEL_BIN" && -z "$FASTWALK_BIN" ]]; then
+  echo "missing at least one binary: specify --walkman, --ignore-parallel, or --fastwalk (see --help)" >&2
+  exit 1
+fi
 
 if [[ ! -d "$TREE" ]]; then
   echo "error: --tree $TREE is not a directory" >&2
@@ -121,8 +127,9 @@ TREE_LINKS=$(find "$TREE" -type l | wc -l)
   echo "run_all.sh — $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
   echo "host: $(uname -srmo 2>/dev/null || uname -a)"
   echo "cpu:  $(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | sed 's/^ *//' || echo unknown)"
-  echo "walkman:          $(realpath -- "$WALKMAN_BIN")"
-  echo "ignore-parallel:  $(realpath -- "$IGNORE_PARALLEL_BIN")"
+  [[ -n "$WALKMAN_BIN" ]] && echo "walkman:          $(realpath -- "$WALKMAN_BIN")"
+  [[ -n "$IGNORE_PARALLEL_BIN" ]] && echo "ignore-parallel:  $(realpath -- "$IGNORE_PARALLEL_BIN")"
+  [[ -n "$FASTWALK_BIN" ]] && echo "fastwalk:         $(realpath -- "$FASTWALK_BIN")"
   echo "tree:             $(realpath -- "$TREE")"
   echo "tree dirs=$TREE_DIRS files=$TREE_FILES symlinks=$TREE_LINKS"
   echo "workers:  $WORKERS"
@@ -132,7 +139,10 @@ TREE_LINKS=$(find "$TREE" -type l | wc -l)
 
 FAILURES=()
 
-common_args=(--walkman "$WALKMAN_BIN" --ignore-parallel "$IGNORE_PARALLEL_BIN" --tree "$TREE" --workers "$WORKERS")
+common_args=(--tree "$TREE" --workers "$WORKERS")
+[[ -n "$WALKMAN_BIN" ]] && common_args+=(--walkman "$WALKMAN_BIN")
+[[ -n "$IGNORE_PARALLEL_BIN" ]] && common_args+=(--ignore-parallel "$IGNORE_PARALLEL_BIN")
+[[ -n "$FASTWALK_BIN" ]] && common_args+=(--fastwalk "$FASTWALK_BIN")
 
 # Each harness call is allowed to fail without taking down the other —
 # bench_harness.sh in particular can write a complete, valid CSV and THEN

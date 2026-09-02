@@ -36,6 +36,7 @@
 #   ./perf_bench.sh \
 #       --walkman          ../build/main \
 #       --ignore-parallel  ../build/ignore-parallel-cli \
+#       --fastwalk         ../build/fastwalk-cli \
 #       --tree             /tmp/tree_wide \
 #       --workers          "1,2,4,$(nproc)" \
 #       --runs             10 \
@@ -45,6 +46,7 @@ set -euo pipefail
 
 WALKMAN_BIN=""
 IGNORE_PARALLEL_BIN=""
+FASTWALK_BIN=""
 TREE=""
 WORKERS="1,2,4,$(nproc 2>/dev/null || echo 4)"
 RUNS=10
@@ -56,6 +58,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --walkman) WALKMAN_BIN="$2"; shift 2 ;;
     --ignore-parallel) IGNORE_PARALLEL_BIN="$2"; shift 2 ;;
+    --fastwalk) FASTWALK_BIN="$2"; shift 2 ;;
     --tree)    TREE="$2"; shift 2 ;;
     --workers) WORKERS="$2"; shift 2 ;;
     --runs)    RUNS="$2"; shift 2 ;;
@@ -74,11 +77,13 @@ if [[ "$FOLLOW_LINKS" -eq 1 ]]; then
   FOLLOW_FLAG=(--follow-links)
 fi
 
-for req in WALKMAN_BIN IGNORE_PARALLEL_BIN TREE; do
-  if [[ -z "${!req}" ]]; then
-    echo "missing required --${req,,} (see --help)" >&2; exit 1
-  fi
-done
+if [[ -z "$TREE" ]]; then
+  echo "missing required --tree (see --help)" >&2; exit 1
+fi
+
+if [[ -z "$WALKMAN_BIN" && -z "$IGNORE_PARALLEL_BIN" && -z "$FASTWALK_BIN" ]]; then
+  echo "missing at least one binary: specify --walkman, --ignore-parallel, or --fastwalk (see --help)" >&2; exit 1
+fi
 
 # Locate a usable perf binary. On some distro kernels (custom/VM kernels
 # without a matching linux-tools-<version> package) the `perf` shim in
@@ -211,17 +216,29 @@ bench_tool() {
 }
 
 IFS=',' read -ra WLIST <<< "$WORKERS"
-for w in "${WLIST[@]}"; do
-  bench_tool "walkman (Go, workers=$w, follow-links=$FOLLOW_LINKS)" \
-    "walkman" "$w" \
-    "$WALKMAN_BIN" --quiet --workers "$w" "${FOLLOW_FLAG[@]}" "$TREE"
-done
+if [[ -n "$WALKMAN_BIN" ]]; then
+  for w in "${WLIST[@]}"; do
+    bench_tool "walkman (Go, workers=$w, follow-links=$FOLLOW_LINKS)" \
+      "walkman" "$w" \
+      "$WALKMAN_BIN" --quiet --workers "$w" "${FOLLOW_FLAG[@]}" "$TREE"
+  done
+fi
 
-for w in "${WLIST[@]}"; do
-  bench_tool "ignore-parallel-cli (Rust, ignore::WalkParallel, workers=$w, follow-links=$FOLLOW_LINKS)" \
-    "ignore-parallel" "$w" \
-    "$IGNORE_PARALLEL_BIN" --quiet --workers "$w" "${FOLLOW_FLAG[@]}" "$TREE"
-done
+if [[ -n "$IGNORE_PARALLEL_BIN" ]]; then
+  for w in "${WLIST[@]}"; do
+    bench_tool "ignore-parallel-cli (Rust, ignore::WalkParallel, workers=$w, follow-links=$FOLLOW_LINKS)" \
+      "ignore-parallel" "$w" \
+      "$IGNORE_PARALLEL_BIN" --quiet --workers "$w" "${FOLLOW_FLAG[@]}" "$TREE"
+  done
+fi
+
+if [[ -n "$FASTWALK_BIN" ]]; then
+  for w in "${WLIST[@]}"; do
+    bench_tool "fastwalk (Go, fastwalk.Walk, workers=$w, follow-links=$FOLLOW_LINKS)" \
+      "fastwalk" "$w" \
+      "$FASTWALK_BIN" --quiet --workers "$w" "${FOLLOW_FLAG[@]}" "$TREE"
+  done
+fi
 
 # Integrity check: context-switches and cpu-migrations are software events
 # that should always work per the header comment above, but some
