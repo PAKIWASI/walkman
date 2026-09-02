@@ -16,6 +16,7 @@
 - [API](#api)
 - [Traversal semantics](#traversal-semantics)
 - [How it works](#how-it-works)
+- [Channels, not callbacks](#channels-not-callbacks)
 - [CLI tools](#cli-tools)
 - [Benchmarks](#benchmarks)
 - [Testing](#testing)
@@ -25,10 +26,10 @@
 ## Features
 
 - Concurrent traversal via a work-stealing pool, worker count configurable (defaults to `GOMAXPROCS`)
-- Streaming results through a channel, one `WalkResult` per directory
+- Streaming results through a channel, one `WalkResult` per directory — pull-based like an iterator, not a callback
 - Per-directory error reporting that doesn't abort unrelated work
 - Skip entries by name (prunes matching directories), optional max depth, optional symlink following
-- Benchmark suite vs Rust's parallel `ignore::WalkParallel`, on the linux kernel source tree (or any other)
+- Benchmark suite vs Rust's parallel `ignore::WalkParallel` and [fastwalk](https://github.com/charlievieth/fastwalk), on the linux kernel source tree
 
 ## Installation
 
@@ -153,15 +154,31 @@ For every directory: open it, read entries with `File.ReadDir(-1)`, drop skipped
 
 The work-stealing pool itself lives in [`github.com/PAKIWASI/workstealpool`](https://github.com/PAKIWASI/workstealpool).
 
+## Channels, not callbacks
+
+`walkman` is **channel-based**, no callbacks. `Walk` returns `<-chan WalkResult` immediately, and you consume it with an ordinary `for range`. It behaves like a pull iterator over the tree rather than a push callback:
+
+```go
+for result := range w.Walk(root) {
+    // runs on your goroutine, at your pace
+}
+```
+
+This has a few consequences:
+
+- **No shared-state synchronization in your code.** A callback that's invoked concurrently from N workers has to protect anything it touches (counters, buffers, output) with atomics or a mutex, even for something as simple as counting files. A channel consumer is single-threaded by construction, increment a plain `int`, no `sync/atomic` required.
+- **Natural backpressure.** Workers block on a full result channel (bounded by `ResultBuffSize`) until you drain it, so a slow consumer throttles the walk instead of the walker racing ahead and burning memory queuing up callback results you haven't gotten to yet.
+- **Composability with `select`.** Because it's a channel, it drops straight into `select` alongside a `context.Done()`, a timeout, or another channel — cancel a walk mid-traversal without threading a `context.Context` check into every callback invocation.
+- **Stop early for free.** `break` out of the `for range` and the pool stops feeding you more results; a callback-based walker needs you to return a sentinel error (like `filepath.SkipAll`) from inside the callback to achieve the same thing.
+
+
 ## CLI tools
 
-A Go CLI (`main/`) and a Rust reference CLI share matching options for comparison:
-
-- `rust_ignore_parallel/`, wrapping the [`ignore`](https://crates.io/crates/ignore) crate's `WalkBuilder::build_parallel()` (the walker ripgrep uses): a multi-threaded walker, and the relevant comparison for `walkman` since both are concurrent. All of `ignore`'s ripgrep-style filtering (`.gitignore`, hidden files, git excludes) is explicitly disabled so it walks the raw tree, same as `walkman`.
+A Go CLI (`main/`) that provides example usage of `walkman`.
 
 ```bash
-go build -o build/main ./main
-./build/main --workers 8 --skip .git,node_modules /home/me/project
+go build -o build/walkman ./walkman
+./build/main --workers 8 --skip .git,node_modules ~/projects/proj
 ```
 
 ```text
@@ -201,7 +218,6 @@ cd rust_ignore_parallel && cargo build --release    # produces build/ignore-para
 | 4 | 31 | **29** | 38 |
 | 8 | **24** | 29 | 33 |
 
-`walkman` leads at 1, 2, and 8 workers; `ignore-parallel` edges ahead at 4. Results vary by machine, run `test/run_all.sh` / `test/run_all_sym.sh` to reproduce on your own hardware.
 
 ### Conclusion
 
