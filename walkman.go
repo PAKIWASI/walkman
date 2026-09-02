@@ -149,7 +149,7 @@ func NewWalkmanWithConfig(
 	}
 
 	w.workers = make([]WorkerState, pc.PoolSize)
-	if !w.conf.followLinks {
+	if w.conf.followLinks {
 		for i := range w.workers {
 			w.workers[i].dirBuf = make([]dirKey, 16)
 		}
@@ -208,7 +208,7 @@ func filterSkipped(dirs []fs.DirEntry, skip map[string]struct{}) []fs.DirEntry {
 
 // Stores a path in this worker's storage and returns a slice to it
 func (w *Walkman) newPath(workerID int, parent, child string) string {
-	pathStore := w.workers[workerID].pathStore
+	pathStore := &w.workers[workerID].pathStore
 	return pathStore.retrieve(pathStore.storePath(parent, child))
 }
 
@@ -291,16 +291,12 @@ func (w *Walkman) visitSym(
 	}
 
 	before := len(dirs)
-
 	if len(w.conf.skipSet) != 0 && before != 0 {
 		dirs = filterSkipped(dirs, w.conf.skipSet)
 	}
 
-	// Err field is nil until the first problem, which is the common case
-	result := WalkResult{Dir: path, Entries: dirs}
+	result := WalkResult{Dir: path}
 
-	// We do a syscall for dirkey only once per directory.
-	// The rest of the symlinks just reuse those dirkey values
 	worker := &w.workers[workerID]
 	ancestorsResolved := false
 
@@ -324,18 +320,17 @@ func (w *Walkman) visitSym(
 		return false
 	}
 
-	// no new heap alloc, just shortening len
 	swapDel := func(i int) []fs.DirEntry {
 		n := len(dirs)
 		dirs[i] = dirs[n-1]
 		return dirs[:n-1]
 	}
 
-	// swapDel below shrinks dirs mid-loop (cycle case), which would walk the slice out of bounds.
-	// i is only advanced when we don't delete, so a swapped-in entry at position i gets rechecked.
+	atMaxDepth := w.conf.maxDepth != 0 && item.depth+1 > w.conf.maxDepth
+	spawnBuf := worker.spawnBuf[:0]
+
 	for i := 0; i < len(dirs); {
 		entry := dirs[i]
-
 		childPath := w.newPath(workerID, path, entry.Name())
 
 		mode := entry.Type()
@@ -343,23 +338,13 @@ func (w *Walkman) visitSym(
 		isSymlink := mode&fs.ModeSymlink != 0
 
 		if isSymlink {
-			// followLinks is on, so a symlink is classified by what it
-			// resolves to. One os.Stat resolves the whole chain
 			info, err := os.Stat(childPath)
 			if err != nil {
-				// Dangling/unresolvable symlink. Report via the err slice so
-				// users can easily distingish them
-				result.Errs = append(
-					result.Errs,
-					DirErr{Name: entry.Name(), Err: errDanglingSymlink},
-				)
+				result.Errs = append(result.Errs, DirErr{Name: entry.Name(), Err: errDanglingSymlink})
 				dirs = swapDel(i)
 				continue
 			}
-
 			if !info.IsDir() {
-				// Resolves to a non-directory (file, device, etc)
-				// when symlink is a non-dir, we should resolve and report that file
 				dirs[i] = fs.FileInfoToDirEntry(info)
 				i++
 				continue
@@ -370,48 +355,31 @@ func (w *Walkman) visitSym(
 				continue
 			}
 			k := dirKey{dev: uint64(st.Dev), ino: st.Ino}
-
-			// Cycle detected: record it against this one entry and skip
-			// descending into it, but keep processing the rest of dirs.
 			if hasCycle(k) {
-				result.Errs = append(
-					result.Errs,
-					DirErr{Name: entry.Name(), Err: errSymlinkCycle},
-				)
+				result.Errs = append(result.Errs, DirErr{Name: entry.Name(), Err: errSymlinkCycle})
 				dirs = swapDel(i)
-				continue // recheck index i, now holding the swapped-in entry
+				continue
 			}
-
-			// A symlink-to-directory entry never has fs.ModeDir set on its
-			// own DirEntry (Lstat sees fs.ModeSymlink). Rewrite it to the
-			// resolved, dir-typed DirEntry, same as the non-dir branch
-			// above, so callers inspecting Entries see it as a directory.
 			dirs[i] = fs.FileInfoToDirEntry(info)
 			isDir = true
 		}
 
-		if !isDir {
-			i++
-			continue
+		if isDir && !atMaxDepth {
+			spawnBuf = append(spawnBuf, walkItem{
+				depth: item.depth + 1,
+				leaf:  &pathNode{path: childPath, parent: item.leaf},
+			})
 		}
-
-		if w.conf.maxDepth != 0 && item.depth+1 > w.conf.maxDepth {
-			i++
-			continue
-		}
-
-		spawn(walkItem{
-			depth: item.depth + 1,
-			leaf:  &pathNode{path: childPath, parent: item.leaf},
-		})
 		i++
 	}
 
-	// dirs may have been reassigned (shortened) by swapDel above; result
-	// was built from the pre-loop dirs header, so refresh it here.
 	result.Entries = dirs
-
 	res <- result
+
+	if len(spawnBuf) != 0 {
+		spawn(spawnBuf...)
+	}
+
 	return nil
 }
 

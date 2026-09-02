@@ -214,47 +214,6 @@ walkman is faster at every worker count in both modes, with the biggest margins 
 
 Even at 1 worker, walkman racks up thousands of context switches (Go's goroutine/channel machinery runs regardless of worker count) against `ignore`'s near-zero — and pays for it in higher cache-misses at every worker count. It still wins on wall-clock because it executes fewer total instructions throughout: the core traversal path is leaner even though the concurrency scaffolding around it isn't free. CPU migrations tell a related story at 8 workers — walkman averages 85 vs `ignore`'s 3, i.e. Go's scheduler bounces goroutines across cores far more than `ignore`'s threads, which is the likely source of walkman's tapering (not zero) efficiency.
 
-**A caveat on noise:** run-to-run variance isn't even across configs. 1- and 2-worker runs are stable (σ ≈ 4-5 ms) for both tools, so those comparisons are solid. 4- and 8-worker runs are noisier, walkman @ 4 workers had one outlier run (task-clock spiking to 238ms vs a ~110ms baseline, σ ≈ 13ms overall), and `ignore` @ 8 workers ranged from 19.4ms to 42.1ms wall time across its 10 runs (σ ≈ 8.5ms). Treat the 4-worker result in particular as the least conclusive of the four.
-
-### VPS run (Oracle Cloud, KVM guest)
-
-Same harness, same tree, on an Intel Xeon Platinum 8358 (6C/12T, KVM-virtualized), workers swept 1–12.
-
-| Workers | walkman | ignore | walkman (symlinks) | ignore (symlinks) |
-| ---: | ---: | ---: | ---: | ---: |
-| 1 | **75.2 ms** | 79.7 ms | **91.9 ms** | 84.0 ms |
-| 4 | 25.0 ms | 25.0 ms | 32.9 ms | **26.2 ms** |
-| 8 | 20.3 ms | **18.1 ms** | 23.7 ms | **18.9 ms** |
-| 12 | 20.6 ms | **17.3 ms** | 22.6 ms | **18.0 ms** |
-
-Doesn't reproduce the laptop result: walkman wins through 3 workers, ties at 4, then `ignore` leads by ~10% from 5 workers on. Cause, per `perf`: walkman's CPU migrations stay flat (~6–11) through 7 workers, then climb steadily from worker 8 onward (27 → 111 by worker 12), while `ignore`'s stay under 6 throughout — consistent with goroutines getting rebalanced across vCPUs once demand passes this VPS's 6 physical cores, on top of the hypervisor's own scheduling. `ignore`'s OS threads don't pay the same cost.
-
-**Takeaway:** laptop numbers don't transfer to a virtualized VPS. Even so, walkman stays within ~10-20% of hand-tuned Rust at its worst and beats or ties it through 4 workers — about as close as a GC'd language can reasonably get to a systems-language baseline doing the same job.
-
-Reproduce with:
-
-```bash
-cd test
-./run_all.sh \
-  --walkman          ../build/main \
-  --ignore-parallel  ../build/ignore-parallel-cli \
-  --tree             /path/to/linux-7.2.2 \
-  --workers          "1,2,4,$(nproc)" \
-  --runs             10 \
-  --warmup           5 \
-  --out-dir          bench_results
-
-./run_all_sym.sh \
-  --walkman          ../build/main \
-  --ignore-parallel  ../build/ignore-parallel-cli \
-  --tree             /path/to/linux-7.2.2 \
-  --workers          "1,2,4,$(nproc)" \
-  --runs             10 \
-  --warmup           5 \
-  --out-dir          bench_results_symlinks
-```
-
-Both scripts write a `run_manifest.txt` (host/CPU/tree metadata) alongside `hyperfine.csv` and `perf.csv` in `--out-dir`, so results stay traceable to the tree and machine they came from. Run the harnesses individually with `bench_harness.sh` (hyperfine) / `perf_bench.sh` (perf counters) — see each script's `--help`.
 
 ## Testing
 
@@ -279,3 +238,4 @@ The race detector flags a harmless race condition in workstealpool's deque logic
 
 All walkman and workstealpool code is my own. LLM was used to write the rust ignore cli wrapper for benchmarking.
 Also used for basic tests (with alot of modifications afterwards), analysing benchmark output and populating the README's benchmark section.
+
