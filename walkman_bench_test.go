@@ -42,7 +42,7 @@ func walkDirSequential(root string, skip []string) (files, dirs int) {
 			return nil
 		}
 		if path == root {
-			return nil // root itself isn't "found", matching Walkman's Dir/Ret split
+			return nil // root itself isn't "found", matching Walkman's Dir/Entries split
 		}
 		if d.IsDir() {
 			if slices.Contains(skip, d.Name()) {

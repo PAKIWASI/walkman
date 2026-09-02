@@ -75,9 +75,9 @@ func drain(t *testing.T, w *Walkman, root string) ([]WalkResult, error) {
 	return results, w.Wait()
 }
 
-// countEntries sums direct file/dir entries across every WalkResult's Ret
+// countEntries sums direct file/dir entries across every WalkResult's Entries
 // (present whenever the directory itself was readable, regardless of any
-// per-entry errors alongside it) and every ItemErr across every result,
+// per-entry errors alongside it) and every DirErr across every result,
 // the same convention BenchmarkWalk_* uses: a directory's entries are
 // counted once, from its own listing, not re-derived from recursing into
 // it again.
@@ -163,7 +163,7 @@ func TestWalk_EmptyDirectory(t *testing.T) {
 		t.Fatalf("results[0].Err = %v, want empty", results[0].Errs)
 	}
 	if len(results[0].Entries) != 0 {
-		t.Fatalf("results[0].Ret = %v, want empty", results[0].Entries)
+		t.Fatalf("results[0].Entries = %v, want empty", results[0].Entries)
 	}
 }
 
@@ -276,7 +276,7 @@ func TestWalk_SkipList_PrunesSubtree(t *testing.T) {
 		}
 		for _, e := range r.Entries {
 			if e.Name() == "skipme" {
-				t.Fatalf("skipped dir %q still present in root's Ret", e.Name())
+				t.Fatalf("skipped dir %q still present in root's Entries", e.Name())
 			}
 		}
 	}
@@ -348,7 +348,7 @@ func TestWalk_MaxDepth_StopsDescending(t *testing.T) {
 			}
 		}
 		if !found {
-			t.Fatalf("d1's Ret = %v, want it to contain entry d2", r.Entries)
+			t.Fatalf("d1's Entries = %v, want it to contain entry d2", r.Entries)
 		}
 	}
 }
@@ -503,8 +503,8 @@ func TestWalk_BrokenSymlink_DoesNotCrash(t *testing.T) {
 	if len(results[0].Errs) != 1 {
 		t.Fatalf("root result Errs = %v, want exactly 1 (the dangling symlink)", results[0].Errs)
 	}
-	if got := results[0].Errs[0]; got.Name != "dangling" || !errors.Is(got.Err, errDanglingSymlink) {
-		t.Fatalf("root result Errs[0] = %+v, want {Name: dangling, Err: errDanglingSymlink}", got)
+	if got := results[0].Errs[0]; got.Name != "dangling" || !errors.Is(got.Err, ErrDanglingSymlink) {
+		t.Fatalf("root result Errs[0] = %+v, want {Name: dangling, Err: ErrDanglingSymlink}", got)
 	}
 
 	// A dangling symlink is reported via Errs, not left in Entries.
@@ -1328,7 +1328,7 @@ func TestWalk_SkipList_LargeMixedFanout(t *testing.T) {
 		}
 		for _, e := range r.Entries {
 			if _, skipped := skipNames[e.Name()]; skipped {
-				t.Fatalf("skipped entry %q still present in Ret for %s", e.Name(), r.Dir)
+				t.Fatalf("skipped entry %q still present in Entries for %s", e.Name(), r.Dir)
 			}
 		}
 	}
@@ -1341,7 +1341,7 @@ func TestWalk_SkipList_LargeMixedFanout(t *testing.T) {
 		}
 		wantRootEntries := total - len(skipNames)
 		if len(r.Entries) != wantRootEntries {
-			t.Fatalf("root Ret has %d entries, want %d (total=%d skipped=%d)",
+			t.Fatalf("root Entries has %d entries, want %d (total=%d skipped=%d)",
 				len(r.Entries), wantRootEntries, total, len(skipNames))
 		}
 	}

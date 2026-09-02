@@ -3,10 +3,8 @@
 **A concurrent filesystem walker for Go, powered by work stealing.**
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/PAKIWASI/walkman.svg)](https://pkg.go.dev/github.com/PAKIWASI/walkman)
-[Work Steal](https://github.com/PAKIWASI/workstealpool)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-
-> **Status:** experimental / actively evolving. Core walker, tests, and benchmarks are in place; API not yet stable.
+[![Work Stealing Pool](https://img.shields.io/badge/Pool-workstealpool-blue)](https://github.com/PAKIWASI/workstealpool)
 
 `walkman` turns each directory into an independent task and runs those tasks on a configurable work-stealing pool. Idle workers steal pending directories from busier ones, so on **wide trees** with lots of independent directories, more CPU stays busy than a sequential walk allows.
 
@@ -30,7 +28,7 @@
 - Streaming results through a channel, one `WalkResult` per directory
 - Per-directory error reporting that doesn't abort unrelated work
 - Skip entries by name (prunes matching directories), optional max depth, optional symlink following
-- Benchmark suite vs Rust's parallel `ignore::WalkParallel`, on the linux kernel source tree (or any other).
+- Benchmark suite vs Rust's parallel `ignore::WalkParallel`, on the linux kernel source tree (or any other)
 
 ## Installation
 
@@ -82,7 +80,7 @@ func main() {
 func NewWalkman(followLinks bool, maxDepth uint32, skipList []string) *Walkman
 ```
 
-Defaults: `PoolSize = GOMAXPROCS`, `InitialWorkerCap = 32`, `ResultBuffSize = 64`.
+Defaults: `PoolSize = GOMAXPROCS`, `InitialWorkerCap = 32`, `ResultBuffSize = 128`.
 
 ### `NewWalkmanWithConfig`
 
@@ -130,29 +128,30 @@ Blocks until the pool finishes, returns the first fatal pool-level error.
 | **Ordering** | Completion-ordered, not path-sorted. Layer sorting/BFS on top of the stream if you need it. |
 | **Skip list** | Matches entry names at every depth (e.g. `.git`, `node_modules`), a match prunes the whole subtree. |
 | **Max depth** | `0` = unlimited; otherwise the walker won't descend past that depth. |
-| **Symlinks** | Not followed by default. When enabled, resolves via `os.Stat` and descends if the target is a directory. A detected cycle is reported as a `DirErr` (`errSymlinkCycle`) on the offending entry. |
+| **Symlinks** | Not followed by default. When enabled, resolves via `os.Stat` and descends if the target is a directory. A detected cycle is reported as a `DirErr` (`walkman.ErrSymlinkCycle`) on the offending entry. Dangling symlinks are reported as `walkman.ErrDanglingSymlink`. |
 | **Errors** | A directory that fails to open reports its error as the sole `DirErr` in its own `WalkResult`, other workers keep going. |
 
 ## How it works
 
-Each task is intentionally small. The leaf has the fullpath to the walkItem (the fs entry) and a pointer to it's direct ancestor (used if symlinks are enabled).
+Each task is intentionally small. The leaf has the full path to the `walkItem` and a pointer to its direct ancestor (used for cycle detection if symlinks are enabled):
 
 ```go
 type walkItem struct {
     depth uint32
-    leaf *pathNode
+    leaf  *pathNode
 }
 
 type pathNode struct {
-    path    string
-    // only used when --follow-links is enabled
+    path   string
     parent *pathNode
 }
 ```
 
+Path strings are efficiently stored in per-worker heap arena buffers (`stringStore`) to minimize heap allocations during traversal.
+
 For every directory: open it, read entries with `File.ReadDir(-1)`, drop skipped names, classify entries, optionally resolve symlinks, emit a `WalkResult`, and push child directories back onto the pool.
 
-The pool itself lives in [`github.com/PAKIWASI/workstealpool`](https://github.com/PAKIWASI/workstealpool).
+The work-stealing pool itself lives in [`github.com/PAKIWASI/workstealpool`](https://github.com/PAKIWASI/workstealpool).
 
 ## CLI tools
 
@@ -216,7 +215,7 @@ walkman is faster at every worker count in both modes, with the biggest margins 
 
 Even at 1 worker, walkman racks up thousands of context switches (Go's goroutine/channel machinery runs regardless of worker count) against `ignore`'s near-zero — and pays for it in higher cache-misses at every worker count. It still wins on wall-clock because it executes fewer total instructions throughout: the core traversal path is leaner even though the concurrency scaffolding around it isn't free. CPU migrations tell a related story at 8 workers — walkman averages 85 vs `ignore`'s 3, i.e. Go's scheduler bounces goroutines across cores far more than `ignore`'s threads, which is the likely source of walkman's tapering (not zero) efficiency.
 
-### Conclution
+### Conclusion
 
 `walkman` *seems* faster on my machine, both on my fs root and on the linux source. BUT I've seen varying results on different machines/cpus, running the same tests, on the same linux source.
 I'm not claiming my tool is "faster than rust", It is in the ballpark though.
@@ -243,6 +242,7 @@ The race detector flags a harmless race condition in workstealpool's deque logic
 ## LLM Usage
 
 All walkman and workstealpool code is my own. LLM was used to write the rust ignore cli wrapper for benchmarking.
-Also used for basic tests (with alot of modifications afterwards), analysing benchmark output and populating the README's benchmark section.
+Also used for basic tests (with a lot of modifications afterwards), analysing benchmark output and populating the README's benchmark section.
+
 
 

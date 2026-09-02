@@ -8,11 +8,10 @@ import (
 
 const (
 	stringMinimumCap = 1024
-	pathMinimuCap = 16
 )
 
-// stringStore implements a container that stores string efficiently in the heap
-// It grows automatically
+// stringStore implements a container that stores strings efficiently in the heap.
+// It grows automatically as needed.
 type stringStore struct {
 	buf []byte
 	off int
@@ -23,10 +22,10 @@ type stringID struct {
 	len uint32
 }
 
-// NewPathStorage initilises and returns a new PathStorage object.
-// cap controls the inital capacity of the undrelying buffer,
-// passing cap <= 0 sets the buffer capacity to minimumCap (1024)
-func NewPathStorage(cap int) stringStore {
+// newStringStore initializes and returns a new stringStore.
+// cap controls the initial capacity of the underlying buffer;
+// passing cap <= 0 sets the buffer capacity to stringMinimumCap (1024).
+func newStringStore(cap int) stringStore {
 	ps := stringStore{}
 	if cap <= 0 {
 		cap = stringMinimumCap
@@ -39,8 +38,8 @@ func (ss *stringStore) retrieve(id stringID) string {
 	return unsafe.String(unsafe.SliceData(ss.buf[id.off:id.off+id.len]), id.len)
 }
 
-// Store stores the input string in it's own storage and returns an obj
-// that can be used to retrieve the string
+// store stores the input string in its own storage and returns a stringID
+// that can be used to retrieve the string.
 func (ss *stringStore) store(str string) stringID {
 	s := len(str)
 	c := cap(ss.buf)
@@ -60,8 +59,8 @@ func (ss *stringStore) store(str string) stringID {
 	return id
 }
 
-// StorePath normalises and joins parent and child strings as "parent/child"
-// and returns the resulting string id
+// storePath normalizes and joins parent and child strings with the OS path separator
+// and returns the resulting stringID.
 func (ss *stringStore) storePath(parent, child string) stringID {
 	plen := len(parent)
 	clen := len(child)

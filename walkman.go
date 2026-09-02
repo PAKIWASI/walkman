@@ -15,11 +15,11 @@ import (
 	wsp "github.com/PAKIWASI/workstealpool"
 )
 
-// Sentinel errors reported via WalkResult.Err
+// Sentinel errors reported via WalkResult.Errs
 var (
-	errSymlinkCycle    = errors.New("walkman: symlink cycle")
-	errNoDevInoInfo    = errors.New("walkman: no dev/ino info available")
-	errDanglingSymlink = errors.New("walkman: dangling/unresolved symlink")
+	ErrSymlinkCycle    = errors.New("walkman: symlink cycle")
+	ErrNoDevInoInfo    = errors.New("walkman: no dev/ino info available")
+	ErrDanglingSymlink = errors.New("walkman: dangling/unresolved symlink")
 )
 
 type walkConf struct {
@@ -29,8 +29,8 @@ type walkConf struct {
 }
 
 // DirErr is one error encountered while producing a WalkResult.
-// Name identifies which file/dir caused the err while
-// WalkResult.Dir is the directory being listed
+// Name identifies which file/dir caused the error, while
+// WalkResult.Dir is the directory being listed.
 type DirErr struct {
 	Name string
 	Err  error
@@ -38,29 +38,29 @@ type DirErr struct {
 
 // WalkResult is one directory's outcome.
 //
-// Ret and Err are not mutually exclusive: a directory can list
-// successfully (Ret populated) while individual entries inside it still
+// Entries and Errs are not mutually exclusive: a directory can list
+// successfully (Entries populated) while individual entries inside it still
 // had problems (e.g. one dangling symlink, one detected cycle), each
-// recorded as its own ItemErr in Err alongside the otherwise complete Ret.
-// Ret is nil only when the directory itself couldn't be read at all, in
-// which case Err holds exactly that one failure.
+// recorded as its own DirErr in Errs alongside the otherwise complete Entries.
+// Entries is nil only when the directory itself couldn't be read at all, in
+// which case Errs holds exactly that one failure.
 type WalkResult struct {
 	Dir     string
 	Entries []fs.DirEntry
 	Errs    []DirErr
 }
 
-// walkItem is the input to each worker's Task function
-// each worker get's one of these and do the work on it and then spawn
-// more work (if needed) by creating another walkItem
+// walkItem is the input to each worker's Task function.
+// Each worker gets one of these, does the work on it, and then spawns
+// more work (if needed) by creating another walkItem.
 type walkItem struct {
 	depth uint32
 	leaf  *pathNode
 }
 
 // pathNode is a linked list that goes from any walkItem (anything in the filesystem tree)
-// to it's parent node and also stores the full path (starting from root) upto that node
-// used as path storage as well as to detect symlinks (Lstat each path as we go up the chain)
+// to its parent node and also stores the full path (starting from root) up to that node.
+// Used as path storage as well as to detect symlinks (Lstat each path as we go up the chain).
 type pathNode struct {
 	path   string
 	parent *pathNode
@@ -81,7 +81,7 @@ func statKey(path string) (dirKey, error) {
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
-		return dirKey{}, errNoDevInoInfo
+		return dirKey{}, ErrNoDevInoInfo
 	}
 	return dirKey{dev: uint64(st.Dev), ino: st.Ino}, nil
 }
@@ -105,12 +105,12 @@ func DefaultPoolConfig() PoolConfig {
 	}
 }
 
-type WorkerState struct {
+type workerState struct {
 	// scratch space for symlink detection
 	dirBuf []dirKey
-	// Storage for all paths this worker computed
+	// storage for all paths this worker computed
 	pathStore stringStore
-	//
+	// scratch buffer for spawning child items
 	spawnBuf []walkItem
 }
 
@@ -118,7 +118,7 @@ type Walkman struct {
 	conf walkConf
 	pool *wsp.WorkerPool[walkItem, WalkResult]
 	// per-worker state keyed by workerID
-	workers []WorkerState
+	workers []workerState
 }
 
 // NewWalkman builds a Walkman with GOMAXPROCS-based pool sizing.
@@ -149,14 +149,14 @@ func NewWalkmanWithConfig(
 		},
 	}
 
-	w.workers = make([]WorkerState, pc.PoolSize)
+	w.workers = make([]workerState, pc.PoolSize)
 	if w.conf.followLinks {
 		for i := range w.workers {
 			w.workers[i].dirBuf = make([]dirKey, 16)
 		}
 	}
 	for i := range w.workers {
-		w.workers[i].pathStore = NewPathStorage(0)
+		w.workers[i].pathStore = newStringStore(0)
 		w.workers[i].spawnBuf = make([]walkItem, 8)
 	}
 
@@ -193,7 +193,7 @@ func readDir(name string) ([]fs.DirEntry, error) {
 }
 
 // filterSkipped removes, in place and without preserving order, every
-// entry whose Name() is in skip. It's a swap-delete
+// entry whose Name() is in skip. It is an in-place swap-delete.
 func filterSkipped(dirs []fs.DirEntry, skip map[string]struct{}) []fs.DirEntry {
 	n := len(dirs)
 	for i := 0; i < n; {
@@ -207,7 +207,7 @@ func filterSkipped(dirs []fs.DirEntry, skip map[string]struct{}) []fs.DirEntry {
 	return dirs[:n]
 }
 
-// Stores a path in this worker's storage and returns a slice to it
+// newPath stores a path in this worker's storage and returns a string slice referencing it.
 func (w *Walkman) newPath(workerID int, parent, child string) string {
 	pathStore := &w.workers[workerID].pathStore
 	return pathStore.retrieve(pathStore.storePath(parent, child))
@@ -216,7 +216,7 @@ func (w *Walkman) newPath(workerID int, parent, child string) string {
 // visit is the Task run for every directory the walk encounters. It is
 // called concurrently, from any worker in the pool for different items,
 // so it must not touch anything on Walkman that isn't safe for that
-// (conf is read-only after construction)
+// (conf is read-only after construction).
 func (w *Walkman) visit(
 	_ context.Context,
 	workerID int,
@@ -229,7 +229,7 @@ func (w *Walkman) visit(
 	if err != nil {
 		// A permission-denied (or similar) directory is a fact about that
 		// one item, not a reason to kill every other worker in the pool.
-		// Ret stays nil: the directory itself couldn't be read at all, so
+		// Entries stays nil: the directory itself couldn't be read at all, so
 		// there's nothing else this result can carry.
 		res <- WalkResult{Dir: path, Errs: []DirErr{{Name: path, Err: err}}}
 		return nil
@@ -240,17 +240,16 @@ func (w *Walkman) visit(
 		dirs = filterSkipped(dirs, w.conf.skipSet)
 	}
 
-	// send to channel. dont care if it's dirs, files or symlinks
-	// this task doesn't follow symlinks
+	// Send to channel. We don't care if it's dirs, files or symlinks;
+	// this task doesn't follow symlinks.
 	res <- WalkResult{Dir: path, Entries: dirs}
 
-	// we have reached max depth, don't spawn child dirs, stop here
+	// We have reached max depth, don't spawn child dirs, stop here.
 	if w.conf.maxDepth != 0 && item.depth+1 > w.conf.maxDepth {
 		return nil
 	}
 
-	// we have to spawn child dirs
-
+	// Spawn child directories.
 	spawnBuf := w.workers[workerID].spawnBuf[:0]
 
 	for i := range dirs {
@@ -274,7 +273,7 @@ func (w *Walkman) visit(
 // visitSym is visit's counterpart for followLinks: same item type, same
 // pool, only used when the Walkman was built with followLinks on.
 // It additionally resolves symlinked directories and walks into them,
-// guarding against cycles via item.parent, the chain
+// guarding against cycles via item.leaf.parent, the chain
 // of directories from root down to here,
 // regardless of whether each hop was a plain directory or a followed symlink.
 func (w *Walkman) visitSym(
@@ -336,7 +335,7 @@ func (w *Walkman) visitSym(
 		if isSymlink {
 			info, err := os.Stat(childPath)
 			if err != nil {
-				result.Errs = append(result.Errs, DirErr{Name: entry.Name(), Err: errDanglingSymlink})
+				result.Errs = append(result.Errs, DirErr{Name: entry.Name(), Err: ErrDanglingSymlink})
 				dirs = swapDel(i)
 				continue
 			}
@@ -352,7 +351,7 @@ func (w *Walkman) visitSym(
 			}
 			k := dirKey{dev: uint64(st.Dev), ino: st.Ino}
 			if hasCycle(k) {
-				result.Errs = append(result.Errs, DirErr{Name: entry.Name(), Err: errSymlinkCycle})
+				result.Errs = append(result.Errs, DirErr{Name: entry.Name(), Err: ErrSymlinkCycle})
 				dirs = swapDel(i)
 				continue
 			}

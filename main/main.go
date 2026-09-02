@@ -1,9 +1,9 @@
-// walkman-cli: a CLI wrapper around the walkman package built to be
-// directly comparable to the Rust `ignore` wrapper). Same
+// Package main provides a CLI wrapper around the walkman package built to be
+// directly comparable to the Rust `ignore` wrapper. Same
 // flags, same semantics, same output shape, so timing numbers between the
 // two binaries are actually measuring the same thing.
 //
-//	walkman-bench [OPTIONS] [ROOT]
+//	walkman [OPTIONS] [ROOT]
 //
 //	--max-depth N     0 = unlimited (default: 0)
 //	--follow-links    follow symlinks (default: off)
