@@ -227,7 +227,7 @@ go test ./...              # full suite
 go test -bench=. -benchmem ./...
 ```
 
-### Known limitation with `go test -race`
+### What's wrong with `go test -race`
 
 Running `go test -race` on high-concurrency configurations (such as `TestWalk_ConsistentAcrossPoolSizes` under heavy oversubscription with tiny buffers) may occasionally report a data race inside the underlying `workstealpool` library.
 
