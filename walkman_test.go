@@ -1379,3 +1379,209 @@ func TestWalk_SkipList_AgreesWithSequentialCount(t *testing.T) {
 			gotFiles, gotDirs, wantFiles, wantDirs, len(skipList), total)
 	}
 }
+
+// ---------------------------------------------------------------------
+// Edge Cases & Additional Coverage
+// ---------------------------------------------------------------------
+
+func TestWalk_MaxDepth_One(t *testing.T) {
+	root := buildTree(t, []string{
+		"root_file.txt",
+		"sub1/child1.txt",
+		"sub2/child2.txt",
+		"sub2/sub3/child3.txt",
+	})
+
+	// maxDepth=1: only the root itself is visited; its direct children (root_file.txt, sub1, sub2)
+	// are in Entries, but neither sub1 nor sub2 is descended into.
+	w := NewWalkman(false, 1, nil)
+	results, err := drain(t, w, root)
+	if err != nil {
+		t.Fatalf("Wait() = %v, want nil", err)
+	}
+
+	visited := walkedDirs(results)
+	if len(visited) != 1 || visited[0] != root {
+		t.Fatalf("visited %v, want exactly [%q]", visited, root)
+	}
+
+	files, dirs, errs := countEntries(results)
+	if errs != 0 || files != 1 || dirs != 2 {
+		t.Fatalf("files=%d dirs=%d errs=%d, want files=1 dirs=2 errs=0", files, dirs, errs)
+	}
+}
+
+func TestWalk_MaxDepth_WithFollowLinks(t *testing.T) {
+	root := buildTree(t, []string{
+		"real_dir/",
+		"real_dir/file.txt",
+	})
+	skipIfNoSymlinkSupport(t, root)
+
+	target := t.TempDir()
+	if err := os.WriteFile(filepath.Join(target, "outside.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	link := filepath.Join(root, "sym_to_target")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	// maxDepth=1 with followLinks=true: root is visited, symlink target is inspected,
+	// but because depth=1 is max, neither real_dir nor sym_to_target is descended into.
+	w := NewWalkman(true, 1, nil)
+	results, err := drain(t, w, root)
+	if err != nil {
+		t.Fatalf("Wait() = %v, want nil", err)
+	}
+
+	visited := walkedDirs(results)
+	if len(visited) != 1 || visited[0] != root {
+		t.Fatalf("visited %v, want exactly [%q]", visited, root)
+	}
+}
+
+func TestWalk_SkipList_FiltersRegularFiles(t *testing.T) {
+	root := buildTree(t, []string{
+		"keep.txt",
+		"ignore.log",
+		"temp.tmp",
+		"sub/keep2.txt",
+		"sub/ignore.log",
+	})
+
+	w := NewWalkman(false, 0, []string{"ignore.log", "temp.tmp"})
+	results, err := drain(t, w, root)
+	if err != nil {
+		t.Fatalf("Wait() = %v, want nil", err)
+	}
+
+	for _, r := range results {
+		for _, e := range r.Entries {
+			if e.Name() == "ignore.log" || e.Name() == "temp.tmp" {
+				t.Fatalf("skipped file %q found in Entries for %s", e.Name(), r.Dir)
+			}
+		}
+	}
+
+	files, dirs, errs := countEntries(results)
+	if errs != 0 || files != 2 || dirs != 1 {
+		t.Fatalf("files=%d dirs=%d errs=%d, want files=2 dirs=1 errs=0", files, dirs, errs)
+	}
+}
+
+func TestWalk_MultipleBrokenSymlinks_AllReported(t *testing.T) {
+	root := buildTree(t, []string{"ok.txt"})
+	skipIfNoSymlinkSupport(t, root)
+
+	link1 := filepath.Join(root, "broken1")
+	link2 := filepath.Join(root, "broken2")
+	link3 := filepath.Join(root, "broken3")
+
+	if err := os.Symlink(filepath.Join(root, "missing1"), link1); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(root, "missing2"), link2); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(root, "missing3"), link3); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	w := NewWalkman(true, 0, nil)
+	results, err := drain(t, w, root)
+	if err != nil {
+		t.Fatalf("Wait() = %v, want nil", err)
+	}
+
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want 1", len(results))
+	}
+
+	if len(results[0].Errs) != 3 {
+		t.Fatalf("got %d Errs, want 3", len(results[0].Errs))
+	}
+
+	for _, de := range results[0].Errs {
+		if !errors.Is(de.Err, ErrDanglingSymlink) {
+			t.Errorf("Err = %v, want ErrDanglingSymlink for %s", de.Err, de.Name)
+		}
+	}
+}
+
+func TestWalk_ChainedSymlinks(t *testing.T) {
+	root := buildTree(t, nil)
+	skipIfNoSymlinkSupport(t, root)
+
+	targetDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(targetDir, "final.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	// link1 -> link2 -> targetDir
+	link2 := filepath.Join(root, "link2")
+	link1 := filepath.Join(root, "link1")
+	if err := os.Symlink(targetDir, link2); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	if err := os.Symlink(link2, link1); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	// broken_link1 -> broken_link2 -> nonexistent
+	broken2 := filepath.Join(root, "broken2")
+	broken1 := filepath.Join(root, "broken1")
+	if err := os.Symlink(filepath.Join(root, "does_not_exist"), broken2); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	if err := os.Symlink(broken2, broken1); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	w := NewWalkman(true, 0, nil)
+	results, err := drain(t, w, root)
+	if err != nil {
+		t.Fatalf("Wait() = %v, want nil", err)
+	}
+
+	// Verify broken chain is reported in Errs
+	foundBroken1, foundBroken2 := false, false
+	for _, r := range results {
+		for _, de := range r.Errs {
+			if de.Name == "broken1" && errors.Is(de.Err, ErrDanglingSymlink) {
+				foundBroken1 = true
+			}
+			if de.Name == "broken2" && errors.Is(de.Err, ErrDanglingSymlink) {
+				foundBroken2 = true
+			}
+		}
+	}
+	if !foundBroken1 || !foundBroken2 {
+		t.Errorf("broken symlinks not properly reported: broken1=%v broken2=%v", foundBroken1, foundBroken2)
+	}
+}
+
+func TestWalk_LargeFlatDirectory(t *testing.T) {
+	root := t.TempDir()
+	const count = 3000
+
+	for i := range count {
+		f := filepath.Join(root, "file"+itoa(i)+".txt")
+		if err := os.WriteFile(f, []byte("a"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
+
+	w := NewWalkmanWithConfig(false, 0, nil, PoolConfig{PoolSize: 4, InitialWorkerCap: 32, ResultBuffSize: 16})
+	results, err := drain(t, w, root)
+	if err != nil {
+		t.Fatalf("Wait() = %v, want nil", err)
+	}
+
+	files, dirs, errs := countEntries(results)
+	if errs != 0 || dirs != 0 || files != count {
+		t.Fatalf("files=%d dirs=%d errs=%d, want files=%d dirs=0 errs=0", files, dirs, errs, count)
+	}
+}
+

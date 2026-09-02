@@ -47,4 +47,46 @@ func TestStringStore_StoreAndRetrieve(t *testing.T) {
 	}
 }
 
+func TestStringStore_GrowthUnderHighVolume(t *testing.T) {
+	p := newStringStore(64) // tiny initial capacity to force many resizes
+	const count = 5000
+
+	type stored struct {
+		id   stringID
+		want string
+	}
+
+	var items []stored
+	for i := range count {
+		parent := "root/dir" + itoa(i)
+		child := "leaf" + itoa(i) + ".txt"
+		want := parent + string(os.PathSeparator) + child
+		id := p.storePath(parent, child)
+		items = append(items, stored{id: id, want: want})
+	}
+
+	// Verify all items are still intact and uncorrupted after numerous buffer reallocations
+	for i, it := range items {
+		if got := p.retrieve(it.id); got != it.want {
+			t.Fatalf("item %d: retrieve = %q, want %q", i, got, it.want)
+		}
+	}
+}
+
+func TestStringStore_DeepNesting(t *testing.T) {
+	p := newStringStore(0)
+	current := "root"
+
+	for level := 1; level <= 60; level++ {
+		child := "level" + itoa(level)
+		want := current + string(os.PathSeparator) + child
+		id := p.storePath(current, child)
+		if got := p.retrieve(id); got != want {
+			t.Fatalf("level %d: retrieve = %q, want %q", level, got, want)
+		}
+		current = want
+	}
+}
+
+
 
