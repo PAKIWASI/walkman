@@ -16,7 +16,8 @@
 # Usage (run from walkman/walkman/test/, same directory bench_harness.sh
 # and perf_bench.sh already live in):
 #   ./run_all.sh \
-#       --walkman          ../build/main \
+#       --walkman          ../build/walkman \
+#       --fastwalk         ../build/fastwalk \
 #       --ignore-parallel  ../build/ignore-parallel-cli \
 #       --tree             /path/to/linux-7.2.2 \
 #       --workers          "1,2,4,$(nproc)" \
