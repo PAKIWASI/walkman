@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"syscall"
 
 	wsp "github.com/PAKIWASI/workstealpool"
@@ -312,12 +313,7 @@ func (w *Walkman) visitSym(
 				worker.dirBuf = append(worker.dirBuf, nk)
 			}
 		}
-		for _, ak := range worker.dirBuf {
-			if ak == k {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(worker.dirBuf, k)
 	}
 
 	swapDel := func(i int) []fs.DirEntry {
