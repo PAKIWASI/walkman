@@ -227,11 +227,13 @@ go test ./...              # full suite
 go test -bench=. -benchmem ./...
 ```
 
-Covers empty/flat directories, equivalence with `filepath.WalkDir`, skip-list pruning, max-depth, symlinks (following, broken links), permission errors, counts accuracy, consistency across worker counts, and worker parking/wake/termination behavior.
+### Known limitation with `go test -race`
 
-### What's wrong with test -race
+Running `go test -race` on high-concurrency configurations (such as `TestWalk_ConsistentAcrossPoolSizes` under heavy oversubscription with tiny buffers) may occasionally report a data race inside the underlying `workstealpool` library.
 
-The race detector flags a harmless race condition in workstealpool's deque logic. Details in [workstealpool/README.md](https://github.com/PAKIWASI/workstealpool/blob/main/README.md)
+This is a known, benign artifact of `workstealpool`'s unboxed Chase-Lev circular ring buffer: when the ring buffer wraps around, ThreadSanitizer flags the physical slot reuse as a race on unboxed struct values (`walkItem`), even though the slot is only reused after the thief has already finished with it.
+
+`walkman`'s internal data structures (including path arena storage, cycle detection sets, and error lists) are completely race-free. For a full technical explanation of the lock-free deque mechanics, see [workstealpool/README.md](https://github.com/PAKIWASI/workstealpool#known-limitation-benign-race-under--race).
 
 
 ## Roadmap
