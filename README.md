@@ -181,44 +181,32 @@ cd rust_ignore_parallel && cargo build --release    # produces build/ignore-para
 
 ## Benchmarks
 
-`walkman` (Go) vs Rust's parallel `ignore::WalkParallel` (the ripgrep walker), walking a real-world tree instead of a synthetic one: the **Linux kernel source** (`linux-7.2.2`, 6,203 dirs / 94,757 files / 99 symlinks, no git history), on an Intel i5-1135G7 (4C/8T). Workers swept at 1/2/4/8, `hyperfine --min-runs 10 --warmup 5` for wall-clock, `perf stat` in parallel for scheduling/cache behavior. Run twice: once plain, once with `--follow-links` via `run_all.sh` / `run_all_sym.sh`.
+`walkman` vs Rust's parallel `ignore::WalkParallel` (the ripgrep walker) vs `fastwalk`, walking the **Linux kernel source** (`linux-7.2.2`, 6,203 dirs / 94,757 files / 99 symlinks). Tested on my laptop: **Intel i5-1135G7 (4C/8T)**, Artix Linux (kernel 7.1.9), via `hyperfine --min-runs 10 --warmup 5`.
 
-**Wall-clock mean (`hyperfine`):**
+**Mean wall-clock (ms), no symlinks:**
 
-| Workers | walkman | ignore | walkman (symlinks) | ignore (symlinks) |
-| ---: | ---: | ---: | ---: | ---: |
-| 1 | **72.8 ms** | 96.3 ms | **81.3 ms** | 108.6 ms |
-| 2 | **41.8 ms** | 46.6 ms | **50.2 ms** | 49.3 ms |
-| 4 | **27.1 ms** | 29.3 ms | **30.1 ms** | 29.3 ms |
-| 8 | **21.7 ms** | 29.0 ms | **22.9 ms** | 27.7 ms |
+| Workers | walkman | ignore-parallel | fastwalk |
+| ---: | ---: | ---: | ---: |
+| 1 | **72** | 101 | 76 |
+| 2 | **44** | 54 | 49 |
+| 4 | 29 | **26** | 35 |
+| 8 | **22** | 26 | 26 |
 
-walkman is faster at every worker count in both modes, with the biggest margins at 1 worker (~1.3x) and 8 workers (~1.3-1.4x); the 4-worker gap is the narrowest and per the `perf` runs below, it's the least statistically clean.
+**Mean wall-clock (ms), following symlinks:**
 
-**Scaling (speedup relative to each tool's own 1-worker time, no symlinks):**
+| Workers | walkman | ignore-parallel | fastwalk |
+| ---: | ---: | ---: | ---: |
+| 1 | **81** | 105 | 81 |
+| 2 | 51 | **50** | 54 |
+| 4 | 31 | **29** | 38 |
+| 8 | **24** | 29 | 33 |
 
-| Workers | walkman speedup | walkman efficiency | ignore speedup | ignore efficiency |
-| ---: | ---: | ---: | ---: | ---: |
-| 2 | 1.74x | 87% | 2.07x | 103% |
-| 4 | 2.69x | 67% | 3.28x | 82% |
-| 8 | 3.36x | 42% | 3.32x | 42% |
-
-`ignore` scales more efficiently from 1→4 workers, but flatlines from 4→8 (3.28x → 3.32x, essentially no gain). `walkman` scales less efficiently early on but keeps improving through 8 workers, which is why it re-opens a lead there instead of hitting a wall.
-
-**Scheduling & memory behavior (`perf stat`, mean of 10 runs, no symlinks):**
-
-| Workers | walkman ctx-switches | ignore ctx-switches | walkman cache-misses | ignore cache-misses | walkman instructions | ignore instructions |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 6,400 | 2 | 711K | 450K | 437M | 463M |
-| 2 | 3,162 | 18 | 746K | 463K | 406M | 466M |
-| 4 | 1,624 | 58 | 816K | 510K | 397M | 470M |
-| 8 | 604 | 106 | 793K | 495K | 403M | 475M |
-
-Even at 1 worker, walkman racks up thousands of context switches (Go's goroutine/channel machinery runs regardless of worker count) against `ignore`'s near-zero — and pays for it in higher cache-misses at every worker count. It still wins on wall-clock because it executes fewer total instructions throughout: the core traversal path is leaner even though the concurrency scaffolding around it isn't free. CPU migrations tell a related story at 8 workers — walkman averages 85 vs `ignore`'s 3, i.e. Go's scheduler bounces goroutines across cores far more than `ignore`'s threads, which is the likely source of walkman's tapering (not zero) efficiency.
+`walkman` leads at 1, 2, and 8 workers; `ignore-parallel` edges ahead at 4. Results vary by machine, run `test/run_all.sh` / `test/run_all_sym.sh` to reproduce on your own hardware.
 
 ### Conclusion
 
 `walkman` *seems* faster on my machine, both on my fs root and on the linux source. BUT I've seen varying results on different machines/cpus, running the same tests, on the same linux source.
-I'm not claiming my tool is "faster than rust", It is in the ballpark though.
+I'm not claiming my tool is "faster than ignore or fastwalk", It is in the ballpark though.
 
 ## Testing
 
@@ -230,9 +218,7 @@ go test -bench=. -benchmem ./...
 ### What's wrong with `go test -race`
 
 Running `go test -race` on high-concurrency configurations (such as `TestWalk_ConsistentAcrossPoolSizes` under heavy oversubscription with tiny buffers) may occasionally report a data race inside the underlying `workstealpool` library.
-
 This is a known, benign artifact of `workstealpool`'s unboxed Chase-Lev circular ring buffer: when the ring buffer wraps around, ThreadSanitizer flags the physical slot reuse as a race on unboxed struct values (`walkItem`), even though the slot is only reused after the thief has already finished with it.
-
 `walkman`'s internal data structures (including path arena storage, cycle detection sets, and error lists) are completely race-free. For a full technical explanation of the lock-free deque mechanics, see [workstealpool/README.md](https://github.com/PAKIWASI/workstealpool#known-limitation-benign-race-under--race).
 
 
@@ -245,6 +231,3 @@ This is a known, benign artifact of `workstealpool`'s unboxed Chase-Lev circular
 
 All walkman and workstealpool code is my own. LLM was used to write the rust ignore cli wrapper for benchmarking.
 Also used for basic tests (with a lot of modifications afterwards), analysing benchmark output and populating the README's benchmark section.
-
-
-
