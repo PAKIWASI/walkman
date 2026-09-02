@@ -109,13 +109,39 @@ type WorkerState struct {
 	dirBuf    []dirKey
 	// Storage for all paths this worker computed
 	pathStore StringStore
+	// each worker buffers walkItems for each subdir
+	// then does one spawn() with the slice.
+	// Only ever touched by the "spawn" branch of visitDir/visitSymDir,
+	// which builds it, calls spawn(), and returns without recursing —
+	// never held live across an inline-recursive call, which would
+	// alias and corrupt it (see visitDir).
+	spawnBuf []walkItem
 }
+
+// inlineCutoff/maxInlineChain default: see plan.md 1.1. Below inlineCutoff
+// child directories, a worker walks them synchronously instead of paying
+// spawn overhead (deque push + pending atomic + wakeup broadcast) for
+// work that's cheaper to just do inline. maxInlineChain caps consecutive
+// inline levels so a long, narrow subtree (e.g. a single-child chain)
+// can't monopolize a worker and hide from stealing indefinitely.
+const (
+	defaultInlineCutoff   = 2
+	defaultMaxInlineChain = 32
+)
 
 type Walkman struct {
 	conf walkConf
 	pool *wsp.WorkerPool[walkItem, WalkResult]
 	// per-worker state keyed by workerID
 	workers []WorkerState
+
+	inlineCutoff   int
+	maxInlineChain int
+	// results produced by inline recursion (i.e. every directory visited
+	// that wasn't itself submitted/spawned as a pool item) are sent here,
+	// bypassing the pool's normal one-result-per-Task path entirely.
+	// Walk() fans this in alongside the pool's own results channel.
+	inlineOut chan WalkResult
 }
 
 // NewWalkman builds a Walkman with GOMAXPROCS-based pool sizing.
@@ -144,6 +170,12 @@ func NewWalkmanWithConfig(
 			maxDepth:    maxDepth,
 			skipSet:     skipSet,
 		},
+		inlineCutoff:   defaultInlineCutoff,
+		maxInlineChain: defaultMaxInlineChain,
+		// buffered so a burst of inline results from one worker doesn't
+		// immediately block on the fan-in goroutine; sized off ResultBuffSize
+		// since it's the same kind of "how bursty can producers get" knob
+		inlineOut: make(chan WalkResult, pc.ResultBuffSize),
 	}
 
 	w.workers = make([]WorkerState, pc.PoolSize)
@@ -154,6 +186,7 @@ func NewWalkmanWithConfig(
 	}
 	for i := range w.workers {
 		w.workers[i].pathStore = NewPathStorage(0)
+		w.workers[i].spawnBuf = make([]walkItem, 8)
 	}
 
 	// The pool is bound to one Task at construction. Which one we hand it
@@ -214,11 +247,27 @@ func (w *Walkman) newPath(workerID int, parent, child string) string {
 // so it must not touch anything on Walkman that isn't safe for that
 // (conf is read-only after construction)
 func (w *Walkman) visit(
-	_ context.Context,
+	ctx context.Context,
 	workerID int,
 	item walkItem,
-	spawn func(walkItem),
+	spawn func(...walkItem),
 ) (WalkResult, bool, error) {
+	return w.visitDir(ctx, workerID, item, spawn, 0), true, nil
+}
+
+// visitDir does the actual work for one directory, then either recurses
+// inline (small fan-out, cheaper than spawn overhead) or spawns each
+// child directory onto the pool (large fan-out, worth distributing).
+// inlineChain counts consecutive inline levels above this call, so a
+// long, narrow subtree still eventually surfaces to the pool instead of
+// running unpreemptibly on one worker forever (see plan.md 1.1 "Risk").
+func (w *Walkman) visitDir(
+	ctx context.Context,
+	workerID int,
+	item walkItem,
+	spawn func(...walkItem),
+	inlineChain int,
+) WalkResult {
 	path := item.leaf.path
 	dirs, err := readDir(path)
 	if err != nil {
@@ -226,7 +275,7 @@ func (w *Walkman) visit(
 		// one item, not a reason to kill every other worker in the pool.
 		// Ret stays nil: the directory itself couldn't be read at all, so
 		// there's nothing else this result can carry.
-		return WalkResult{Dir: path, Errs: []DirErr{{Name: path, Err: err}}}, true, nil
+		return WalkResult{Dir: path, Errs: []DirErr{{Name: path, Err: err}}}
 	}
 
 	before := len(dirs)
@@ -234,33 +283,72 @@ func (w *Walkman) visit(
 		dirs = filterSkipped(dirs, w.conf.skipSet)
 	}
 
-    result := WalkResult{Dir: path, Entries: dirs}
+	result := WalkResult{Dir: path, Entries: dirs}
 
+	// count child dirs first (cheap, no allocation) so we know whether to
+	// take the inline path or the spawn path before doing any work
+	descend := w.conf.maxDepth == 0 || item.depth+1 <= w.conf.maxDepth
+	childDirCount := 0
+	if descend {
+		for i := range dirs {
+			mode := dirs[i].Type()
+			if mode.IsDir() && mode&fs.ModeSymlink == 0 {
+				childDirCount++
+			}
+		}
+	}
+
+	if childDirCount == 0 {
+		return result
+	}
+
+	if childDirCount <= w.inlineCutoff && inlineChain < w.maxInlineChain {
+		// Below cutoff: walk children synchronously, right here, on this
+		// worker, instead of paying spawn overhead. Each child's own
+		// result is produced by recursing into visitDir (which may itself
+		// inline further or spawn, depending on ITS OWN child count) and
+		// forwarded to inlineOut manually, since this Task call only gets
+		// to return one WalkResult (this directory's own).
+		for i := range dirs {
+			entry := dirs[i]
+			mode := entry.Type()
+			if mode&fs.ModeSymlink != 0 || !mode.IsDir() {
+				continue
+			}
+			childItem := walkItem{
+				depth: item.depth + 1,
+				leaf:  &pathNode{path: w.newPath(workerID, path, entry.Name()), parent: item.leaf},
+			}
+			childResult := w.visitDir(ctx, workerID, childItem, spawn, inlineChain+1)
+			select {
+			case w.inlineOut <- childResult:
+			case <-ctx.Done():
+				return result
+			}
+		}
+		return result
+	}
+
+	// childDirCount > cutoff: batch-spawn as before. spawnBuf is only
+	// ever used here — built and handed to spawn() (which copies every
+	// value out immediately) in the same call, never held across a
+	// recursive call, so reusing it across Task invocations is safe.
+	children := w.workers[workerID].spawnBuf[:0]
 	for i := range dirs {
 		entry := dirs[i]
-
 		mode := entry.Type()
-
-		// this Task never follows symlinks
-		if mode&fs.ModeSymlink != 0 {
+		if mode&fs.ModeSymlink != 0 || !mode.IsDir() {
 			continue
 		}
-
-		if mode.IsDir() {
-			continue
-		}
-
-		if w.conf.maxDepth != 0 && item.depth+1 > w.conf.maxDepth {
-			continue
-		}
-
-		spawn(walkItem{
+		children = append(children, walkItem{
 			depth: item.depth + 1,
 			leaf:  &pathNode{path: w.newPath(workerID, path, entry.Name()), parent: item.leaf},
 		})
 	}
+	w.workers[workerID].spawnBuf = children
+	spawn(children...)
 
-	return result, true, nil
+	return result
 }
 
 // visitSym is visit's counterpart for followLinks: same item type, same
@@ -273,7 +361,7 @@ func (w *Walkman) visitSym(
 	_ context.Context,
 	workerID int,
 	item walkItem,
-	spawn func(walkItem),
+	spawn func(...walkItem),
 ) (WalkResult, bool, error) {
 
 	path := item.leaf.path
@@ -292,22 +380,22 @@ func (w *Walkman) visitSym(
 
 	// We do a syscall for dirkey only once per directory.
 	// The rest of the symlinks just reuse those dirkey values
-	worker := &w.workers[workerID]
+	// TODO: value vs pointer
+	dirBuf := w.workers[workerID].dirBuf[:0]
 	ancestorsResolved := false
 
 	hasCycle := func(k dirKey) bool {
 		if !ancestorsResolved {
 			ancestorsResolved = true
-			worker.dirBuf = worker.dirBuf[:0]
 			for n := item.leaf; n != nil; n = n.parent {
 				nk, err := statKey(n.path)
 				if err != nil {
 					continue
 				}
-				worker.dirBuf = append(worker.dirBuf, nk)
+				dirBuf = append(dirBuf, nk)
 			}
 		}
-		for _, ak := range worker.dirBuf {
+		for _, ak := range dirBuf {
 			if ak == k {
 				return true
 			}
@@ -321,6 +409,8 @@ func (w *Walkman) visitSym(
 		dirs[i] = dirs[n-1]
 		return dirs[:n-1]
 	}
+
+	spawnBuf := w.workers[workerID].spawnBuf[:0]
 
 	// swapDel below shrinks dirs mid-loop (cycle case), which would walk the slice out of bounds.
 	// i is only advanced when we don't delete, so a swapped-in entry at position i gets rechecked.
@@ -391,12 +481,18 @@ func (w *Walkman) visitSym(
 			continue
 		}
 
-		spawn(walkItem{
+		spawnBuf = append(spawnBuf, walkItem{
 			depth: item.depth + 1,
-			leaf:  &pathNode{path: childPath, parent: item.leaf},
+			leaf: &pathNode{path: childPath, parent: item.leaf},
 		})
+		// spawn(walkItem{
+		// 	depth: item.depth + 1,
+		// 	leaf:  &pathNode{path: childPath, parent: item.leaf},
+		// })
 		i++
 	}
+	
+	spawn(spawnBuf...)
 
 	// dirs may have been reassigned (shortened) by swapDel above; result
 	// was built from the pre-loop dirs header, so refresh it here.
@@ -409,6 +505,16 @@ func (w *Walkman) visitSym(
 // The channel closes once every worker has finished (no work left, or a
 // fatal error occurred). Call Wait after draining the channel to get the
 // terminal error, if any.
+//
+// Results come from two producers that get fanned into the one channel
+// returned here: the pool's own results (one per spawned/submitted item)
+// and inlineOut (one per directory visited via inline recursion, see
+// visitDir). It's safe to close inlineOut right after the pool's own
+// channel closes: every inline send happens synchronously inside a Task
+// call, which must return before that item's `pending` count decrements,
+// which must happen before the pool can decide there's no work left
+// anywhere and close its results channel — so by then every inline send
+// for every submitted item has already completed.
 func (w *Walkman) Walk(root string) <-chan WalkResult {
 	// Clean once, here, so every child path built during the walk (via
 	// join, not filepath.Join) can assume its parent is already clean
@@ -417,7 +523,38 @@ func (w *Walkman) Walk(root string) <-chan WalkResult {
 
 	// parent is nil for the first walkItem
 	w.pool.Submit(walkItem{depth: 1, leaf: &pathNode{path: root}})
-	return w.pool.Run()
+	poolResults := w.pool.Run()
+
+	out := make(chan WalkResult, cap(w.inlineOut))
+	go func() {
+		defer close(out)
+		inlineOut := w.inlineOut
+		for poolResults != nil || inlineOut != nil {
+			select {
+			case r, ok := <-poolResults:
+				if !ok {
+					poolResults = nil
+					continue
+				}
+				out <- r
+			case r, ok := <-inlineOut:
+				if !ok {
+					inlineOut = nil
+					continue
+				}
+				out <- r
+			}
+		}
+	}()
+
+	// Close inlineOut once every worker has exited (see doc comment above
+	// for why this can't race a pending inline send).
+	go func() {
+		w.pool.Wait()
+		close(w.inlineOut)
+	}()
+
+	return out
 }
 
 // Wait blocks until the walk has fully finished and returns the first
