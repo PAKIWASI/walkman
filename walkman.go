@@ -108,7 +108,7 @@ type WorkerState struct {
 	// scratch space for symlink detection
 	dirBuf []dirKey
 	// Storage for all paths this worker computed
-	pathStore StringStore
+	pathStore stringStore
 	//
 	spawnBuf []walkItem
 }
@@ -208,8 +208,8 @@ func filterSkipped(dirs []fs.DirEntry, skip map[string]struct{}) []fs.DirEntry {
 
 // Stores a path in this worker's storage and returns a slice to it
 func (w *Walkman) newPath(workerID int, parent, child string) string {
-	id := w.workers[workerID].pathStore.StorePath(parent, child)
-	return id.String()
+	pathStore := w.workers[workerID].pathStore
+	return pathStore.retrieve(pathStore.storePath(parent, child))
 }
 
 // visit is the Task run for every directory the walk encounters. It is
@@ -255,9 +255,9 @@ func (w *Walkman) visit(
 	for i := range dirs {
 		if dirs[i].Type().IsDir() {
 			spawnBuf = append(spawnBuf, walkItem{
-				depth: item.depth+1,
+				depth: item.depth + 1,
 				leaf: &pathNode{
-					path: w.newPath(workerID, path, dirs[i].Name()),
+					path:   w.newPath(workerID, path, dirs[i].Name()),
 					parent: item.leaf,
 				},
 			})

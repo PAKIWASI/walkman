@@ -7,55 +7,54 @@ import (
 )
 
 const (
-	minimumCap = 1024
+	stringMinimumCap = 1024
+	pathMinimuCap = 16
 )
 
-// StringStore implements a container that stores string efficiently in the heap
+// stringStore implements a container that stores string efficiently in the heap
 // It grows automatically
-type StringStore struct {
+type stringStore struct {
 	buf []byte
 	off int
 }
 
-type StringID struct {
-	store *StringStore
-	off   int
-	len   int
-}
-
-// read-only view of the byte buffer. Strings are immutable so it's all good
-func (s *StringID) String() string {
-	return unsafe.String(unsafe.SliceData(s.store.buf[s.off:s.off+s.len]), s.len)
+type stringID struct {
+	off uint32
+	len uint32
 }
 
 // NewPathStorage initilises and returns a new PathStorage object.
 // cap controls the inital capacity of the undrelying buffer,
 // passing cap <= 0 sets the buffer capacity to minimumCap (1024)
-func NewPathStorage(cap int) StringStore {
-	ps := StringStore{}
+func NewPathStorage(cap int) stringStore {
+	ps := stringStore{}
 	if cap <= 0 {
-		cap = minimumCap
+		cap = stringMinimumCap
 	}
 	ps.buf = make([]byte, cap)
 	return ps
 }
 
+func (ss *stringStore) retrieve(id stringID) string {
+	return unsafe.String(unsafe.SliceData(ss.buf[id.off:id.off+id.len]), id.len)
+}
+
 // Store stores the input string in it's own storage and returns an obj
 // that can be used to retrieve the string
-func (p *StringStore) Store(str string) StringID {
+func (ss *stringStore) store(str string) stringID {
 	s := len(str)
-	c := cap(p.buf)
-	id := StringID{store: p, off: p.off, len: s}
+	c := cap(ss.buf)
+	id := stringID{off: uint32(ss.off), len: uint32(s)}
 	if s > 0 {
-		if p.off+s > len(p.buf) {
-			if p.off+s >= c {
-				p.buf = slices.Grow(p.buf, 2*c+s)
+		if ss.off+s > len(ss.buf) {
+			if ss.off+s >= c {
+				ss.buf = slices.Grow(ss.buf, 2*c+s)
 			}
-			p.buf = p.buf[:p.off+s]
+			ss.buf = ss.buf[:ss.off+s]
 		}
 
-		copy(p.buf[p.off:p.off+s], str)
-		p.off += s
+		copy(ss.buf[ss.off:ss.off+s], str)
+		ss.off += s
 	}
 
 	return id
@@ -63,7 +62,7 @@ func (p *StringStore) Store(str string) StringID {
 
 // StorePath normalises and joins parent and child strings as "parent/child"
 // and returns the resulting string id
-func (p *StringStore) StorePath(parent, child string) StringID {
+func (ss *stringStore) storePath(parent, child string) stringID {
 	plen := len(parent)
 	clen := len(child)
 	sep := 0
@@ -72,22 +71,57 @@ func (p *StringStore) StorePath(parent, child string) StringID {
 	}
 	total := plen + sep + clen
 
-	c := cap(p.buf)
-	if p.off+total > len(p.buf) {
-		if p.off+total >= c {
-			p.buf = slices.Grow(p.buf, 2*c+total)
+	c := cap(ss.buf)
+	if ss.off+total > len(ss.buf) {
+		if ss.off+total >= c {
+			ss.buf = slices.Grow(ss.buf, 2*c+total)
 		}
-		p.buf = p.buf[:p.off+total]
+		ss.buf = ss.buf[:ss.off+total]
 	}
 
-	id := StringID{store: p, off: p.off, len: total}
+	id := stringID{off: uint32(ss.off), len: uint32(total)}
 
-	copy(p.buf[p.off:p.off+plen], parent)
+	copy(ss.buf[ss.off:ss.off+plen], parent)
 	if sep == 1 {
-		p.buf[p.off+plen] = os.PathSeparator
+		ss.buf[ss.off+plen] = os.PathSeparator
 	}
-	copy(p.buf[p.off+plen+sep:p.off+total], child)
-	p.off += total
+	copy(ss.buf[ss.off+plen+sep:ss.off+total], child)
+	ss.off += total
 
 	return id
 }
+
+type pathNodeStore struct {
+	// all pathNode objects
+	buf []pathNodeID
+}
+
+type pathNodeID struct {
+	path string
+	store *pathNode
+}
+
+func newPathNodeStore(cap int) pathNodeStore {
+	ps := pathNodeStore{}
+	if cap <= 0 {
+		cap = pathMinimuCap
+	}
+	ps.buf = make([]pathNodeID, cap)
+	return ps
+}
+
+func (ps *pathNodeStore) store(path string, parentIdx uint32) pathNodeID {
+	pn := pathNodeID{
+		path: path,
+		idx: uint32(len(ps.buf)),
+		parentIdx: parentIdx,
+	}
+	ps.buf = append(ps.buf, pn)
+	return pn
+}
+
+func (ps *pathNodeStore) retrieve(idx uint32) pathNodeID {
+	return ps.buf[int(idx)]
+}
+
+
