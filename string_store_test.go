@@ -1,7 +1,6 @@
-package walkman_test
+package walkman
 
 import(
-	"github.com/PAKIWASI/walkman"
 	"testing"
 )
 
@@ -21,13 +20,13 @@ func TestStringStore_StorePath(t *testing.T) {
 		// {"test5", "", "something", "/something"},
 	}
 
+	p := NewPathStorage(0)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 
-			p := walkman.NewPathStorage(0)
-			got := p.StorePath(tt.parent, tt.child)
+			got := p.storePath(tt.parent, tt.child)
 
-			if got.String() != tt.want {
+			if  p.retrieve(got) != tt.want {
 				t.Errorf("StorePath() = %v, want %v", got, tt.want)
 			}
 		})

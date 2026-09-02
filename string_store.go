@@ -91,37 +91,4 @@ func (ss *stringStore) storePath(parent, child string) stringID {
 	return id
 }
 
-type pathNodeStore struct {
-	// all pathNode objects
-	buf []pathNodeID
-}
-
-type pathNodeID struct {
-	path string
-	store *pathNode
-}
-
-func newPathNodeStore(cap int) pathNodeStore {
-	ps := pathNodeStore{}
-	if cap <= 0 {
-		cap = pathMinimuCap
-	}
-	ps.buf = make([]pathNodeID, cap)
-	return ps
-}
-
-func (ps *pathNodeStore) store(path string, parentIdx uint32) pathNodeID {
-	pn := pathNodeID{
-		path: path,
-		idx: uint32(len(ps.buf)),
-		parentIdx: parentIdx,
-	}
-	ps.buf = append(ps.buf, pn)
-	return pn
-}
-
-func (ps *pathNodeStore) retrieve(idx uint32) pathNodeID {
-	return ps.buf[int(idx)]
-}
-
 
