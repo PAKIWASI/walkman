@@ -3,8 +3,8 @@
 build/
 target/
 
-bench_results/
-bench_results_symlinks/
+bench_results*/
+bench_results_symlinks*/
 
 *.log
 *.csv

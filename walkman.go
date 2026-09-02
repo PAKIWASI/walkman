@@ -22,8 +22,8 @@ var (
 )
 
 type walkConf struct {
-	followLinks bool   // off by default
-	maxDepth    uint32 // 0 means unlimited
+	followLinks bool                // off by default
+	maxDepth    uint32              // 0 means unlimited
 	skipSet     map[string]struct{} // directories/files to skip from the result
 }
 
@@ -106,9 +106,11 @@ func DefaultPoolConfig() PoolConfig {
 
 type WorkerState struct {
 	// scratch space for symlink detection
-	dirBuf    []dirKey
+	dirBuf []dirKey
 	// Storage for all paths this worker computed
 	pathStore StringStore
+	//
+	spawnBuf []walkItem
 }
 
 type Walkman struct {
@@ -154,6 +156,7 @@ func NewWalkmanWithConfig(
 	}
 	for i := range w.workers {
 		w.workers[i].pathStore = NewPathStorage(0)
+		w.workers[i].spawnBuf = make([]walkItem, 8)
 	}
 
 	// The pool is bound to one Task at construction. Which one we hand it
@@ -218,7 +221,7 @@ func (w *Walkman) visit(
 	workerID int,
 	item walkItem,
 	res chan<- WalkResult,
-	spawn func(walkItem),
+	spawn func(...walkItem),
 ) error {
 	path := item.leaf.path
 	dirs, err := readDir(path)
@@ -227,45 +230,44 @@ func (w *Walkman) visit(
 		// one item, not a reason to kill every other worker in the pool.
 		// Ret stays nil: the directory itself couldn't be read at all, so
 		// there's nothing else this result can carry.
-		return WalkResult{Dir: path, Errs: []DirErr{{Name: path, Err: err}}}, true, nil
+		res <- WalkResult{Dir: path, Errs: []DirErr{{Name: path, Err: err}}}
+		return nil
 	}
 
 	before := len(dirs)
-
 	if len(w.conf.skipSet) != 0 && before != 0 {
 		dirs = filterSkipped(dirs, w.conf.skipSet)
 	}
 
-    result := WalkResult{Dir: path, Entries: dirs}
+	// send to channel. dont care if it's dirs, files or symlinks
+	// this task doesn't follow symlinks
+	res <- WalkResult{Dir: path, Entries: dirs}
 
-
-	for i := range dirs {
-		entry := dirs[i]
-
-		mode := entry.Type()
-		isDir := mode.IsDir()
-		isSymlink := mode&fs.ModeSymlink != 0
-
-		// this Task never follows symlinks
-		if isSymlink {
-			continue
-		}
-
-		if !isDir {
-			continue
-		}
-
-		if w.conf.maxDepth != 0 && item.depth+1 > w.conf.maxDepth {
-			continue
-		}
-
-		spawn(walkItem{
-			depth: item.depth + 1,
-			leaf:  &pathNode{path: w.newPath(workerID, path, entry.Name()), parent: item.leaf},
-		})
+	// we have reached max depth, don't spawn child dirs, stop here
+	if w.conf.maxDepth != 0 && item.depth+1 > w.conf.maxDepth {
+		return nil
 	}
 
-	return result, true, nil
+	// we have to spawn child dirs
+
+	spawnBuf := w.workers[workerID].spawnBuf[:0]
+
+	for i := range dirs {
+		if dirs[i].Type().IsDir() {
+			spawnBuf = append(spawnBuf, walkItem{
+				depth: item.depth+1,
+				leaf: &pathNode{
+					path: w.newPath(workerID, path, dirs[i].Name()),
+					parent: item.leaf,
+				},
+			})
+		}
+	}
+	if len(spawnBuf) != 0 {
+		spawn(spawnBuf...)
+	}
+
+	return nil
 }
 
 // visitSym is visit's counterpart for followLinks: same item type, same
@@ -279,14 +281,13 @@ func (w *Walkman) visitSym(
 	workerID int,
 	item walkItem,
 	res chan<- WalkResult,
-	spawn func(walkItem),
+	spawn func(...walkItem),
 ) error {
-
 	path := item.leaf.path
-
 	dirs, err := readDir(path)
 	if err != nil {
-		return WalkResult{Dir: path, Errs: []DirErr{{Name: path, Err: err}}}, true, nil
+		res <- WalkResult{Dir: path, Errs: []DirErr{{Name: path, Err: err}}}
+		return nil
 	}
 
 	before := len(dirs)
@@ -410,7 +411,8 @@ func (w *Walkman) visitSym(
 	// was built from the pre-loop dirs header, so refresh it here.
 	result.Entries = dirs
 
-	return result, true, nil
+	res <- result
+	return nil
 }
 
 // Walk starts walking root and returns a channel of per-directory results.
