@@ -21,7 +21,6 @@
 # and perf_bench.sh already live in):
 #   ./run_all_sym.sh \
 #       --walkman          ../build/walkman \
-#       --fastwalk         ../build/fastwalk \
 #       --ignore-parallel  ../build/ignore-parallel-cli \
 #       --tree             /path/to/linux-7.2.2 \
 #       --workers          "1,2,4,$(nproc)" \
@@ -37,7 +36,6 @@ set -euo pipefail
 
 WALKMAN_BIN=""
 IGNORE_PARALLEL_BIN=""
-FASTWALK_BIN=""
 TREE=""
 WORKERS="1,2,4,$(nproc 2>/dev/null || echo 4)"
 RUNS=10
@@ -51,7 +49,6 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --walkman) WALKMAN_BIN="$2"; shift 2 ;;
     --ignore-parallel) IGNORE_PARALLEL_BIN="$2"; shift 2 ;;
-    --fastwalk) FASTWALK_BIN="$2"; shift 2 ;;
     --tree)    TREE="$2"; shift 2 ;;
     --workers) WORKERS="$2"; shift 2 ;;
     --runs)    RUNS="$2"; shift 2 ;;
@@ -80,8 +77,8 @@ if [[ -z "$TREE" ]]; then
   exit 1
 fi
 
-if [[ -z "$WALKMAN_BIN" && -z "$IGNORE_PARALLEL_BIN" && -z "$FASTWALK_BIN" ]]; then
-  echo "missing at least one binary: specify --walkman, --ignore-parallel, or --fastwalk (see --help)" >&2
+if [[ -z "$WALKMAN_BIN" && -z "$IGNORE_PARALLEL_BIN" ]]; then
+  echo "missing at least one binary: specify --walkman or --ignore-parallel (see --help)" >&2
   exit 1
 fi
 
@@ -134,7 +131,6 @@ fi
   echo "cpu:  $(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | sed 's/^ *//' || echo unknown)"
   [[ -n "$WALKMAN_BIN" ]] && echo "walkman:          $(realpath -- "$WALKMAN_BIN")"
   [[ -n "$IGNORE_PARALLEL_BIN" ]] && echo "ignore-parallel:  $(realpath -- "$IGNORE_PARALLEL_BIN")"
-  [[ -n "$FASTWALK_BIN" ]] && echo "fastwalk:         $(realpath -- "$FASTWALK_BIN")"
   echo "tree:             $(realpath -- "$TREE")"
   echo "tree dirs=$TREE_DIRS files=$TREE_FILES symlinks=$TREE_LINKS"
   echo "workers:  $WORKERS"
@@ -148,7 +144,6 @@ FAILURES=()
 common_args=(--tree "$TREE" --workers "$WORKERS" --follow-links)
 [[ -n "$WALKMAN_BIN" ]] && common_args+=(--walkman "$WALKMAN_BIN")
 [[ -n "$IGNORE_PARALLEL_BIN" ]] && common_args+=(--ignore-parallel "$IGNORE_PARALLEL_BIN")
-[[ -n "$FASTWALK_BIN" ]] && common_args+=(--fastwalk "$FASTWALK_BIN")
 
 # Each harness call is allowed to fail without taking down the other —
 # same reasoning as run_all.sh: bench_harness.sh can write a complete,

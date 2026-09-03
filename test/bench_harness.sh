@@ -47,7 +47,6 @@
 #   ./bench_harness.sh \
 #       --walkman          ../build/main \
 #       --ignore-parallel  ../build/ignore-parallel-cli \
-#       --fastwalk         ../build/fastwalk-cli \
 #       --tree             /tmp/tree_wide \
 #       --workers          "1,2,4,$(nproc)" \
 #       --out              results_wide.csv
@@ -56,7 +55,6 @@ set -euo pipefail
 
 WALKMAN_BIN=""
 IGNORE_PARALLEL_BIN=""
-FASTWALK_BIN=""
 TREE=""
 WORKERS="1,2,4,$(nproc 2>/dev/null || echo 4)"
 OUT="bench_results.csv"
@@ -71,7 +69,6 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --walkman) WALKMAN_BIN="$2"; shift 2 ;;
     --ignore-parallel) IGNORE_PARALLEL_BIN="$2"; shift 2 ;;
-    --fastwalk) FASTWALK_BIN="$2"; shift 2 ;;
     --tree)    TREE="$2"; shift 2 ;;
     --workers) WORKERS="$2"; shift 2 ;;
     --out)     OUT="$2"; shift 2 ;;
@@ -118,8 +115,8 @@ if [[ -z "$TREE" ]]; then
   echo "missing required --tree (see --help)" >&2; exit 1
 fi
 
-if [[ -z "$WALKMAN_BIN" && -z "$IGNORE_PARALLEL_BIN" && -z "$FASTWALK_BIN" ]]; then
-  echo "missing at least one binary: specify --walkman, --ignore-parallel, or --fastwalk (see --help)" >&2; exit 1
+if [[ -z "$WALKMAN_BIN" && -z "$IGNORE_PARALLEL_BIN" ]]; then
+  echo "missing at least one binary: specify --walkman or --ignore-parallel (see --help)" >&2; exit 1
 fi
 
 command -v hyperfine >/dev/null || { echo "hyperfine not found: https://github.com/sharkdp/hyperfine#installation" >&2; exit 1; }
@@ -223,15 +220,7 @@ if [[ -n "$IGNORE_PARALLEL_BIN" ]]; then
   done
 fi
 
-if [[ -n "$FASTWALK_BIN" ]]; then
-  for w in "${WLIST[@]}"; do
-    echo "=== fastwalk (Go, fastwalk.Walk, workers=$w, follow-links=$FOLLOW_LINKS) ==="
-    CMD="$FASTWALK_BIN --quiet --workers $w $FOLLOW_FLAG '$TREE'"
-    hyperfine --warmup "$WARMUP" --min-runs "$MIN_RUNS" "${MAX_RUNS_FLAG[@]}" --export-json "$SCRATCH/hf_fastwalk.json" "$CMD"
-    IFS=',' read -r cpu_user cpu_sys <<< "$(capture_cpu_time "$CMD")"
-    write_row "fastwalk" "$w" "$SCRATCH/hf_fastwalk.json" "$cpu_user" "$cpu_sys" "$FOLLOW_LINKS"
-  done
-fi
+
 
 echo "results written to $OUT"
 if command -v column >/dev/null 2>&1; then
