@@ -21,23 +21,18 @@ func Test_readDirRaw(t *testing.T) {
 	}
 
 	tests := []struct {
-		name string
+		name    string
 		dirPath string
-		wantErr bool
 	}{
-		{"test", "/home/wasi/Downloads", false},
+		{"test", "."},
+		{"test", "/"},
+		{"test", "/home/wasi"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			gotErr := readDirRaw(tt.dirPath, buf, onEntry)
 			if gotErr != nil {
-				if !tt.wantErr {
-					t.Errorf("readDirRaw() failed: %v", gotErr)
-				}
-				return
-			}
-			if tt.wantErr {
-				t.Fatal("readDirRaw() succeeded unexpectedly")
+				t.Errorf("readDirRaw() failed: %v", gotErr)
 			}
 
 			fmt.Println(names)
@@ -46,4 +41,3 @@ func Test_readDirRaw(t *testing.T) {
 		})
 	}
 }
-

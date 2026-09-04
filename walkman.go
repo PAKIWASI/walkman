@@ -108,6 +108,7 @@ func DefaultPoolConfig() PoolConfig {
 type workerState struct {
 	// scratch space for symlink detection
 	dirBuf []dirKey
+	// stack of inodes
 	// storage for all paths this worker computed
 	pathStore stringStore
 	// scratch buffer for spawning child items
