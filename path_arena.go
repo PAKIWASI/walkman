@@ -10,23 +10,30 @@ const (
 	stringMinimumCap = 1024
 )
 
-// stringStore implements a container that stores strings efficiently in the heap.
+// pathArena implements a container that stores strings efficiently in the heap.
 // It grows automatically as needed.
-type stringStore struct {
+type pathArena struct {
 	buf []byte
 	off int
 }
 
-type stringID struct {
-	off uint32
+type pathID struct {
 	len uint32
+	off uint32
 }
+
+type stringID struct {
+	ArenaWorkerID uint16 // which worker's pathStore PathOff/PathLen resolve against
+	PathLen       uint16 // length of the path
+	PathOff       uint32 // offset into that worker's path arena
+}
+
 
 // newStringStore initializes and returns a new stringStore.
 // cap controls the initial capacity of the underlying buffer;
 // passing cap <= 0 sets the buffer capacity to stringMinimumCap (1024).
-func newStringStore(cap int) stringStore {
-	ps := stringStore{}
+func newStringStore(cap int) pathArena {
+	ps := pathArena{}
 	if cap <= 0 {
 		cap = stringMinimumCap
 	}
@@ -34,16 +41,16 @@ func newStringStore(cap int) stringStore {
 	return ps
 }
 
-func (ss *stringStore) retrieve(id stringID) string {
+func (ss *pathArena) retrieve(id pathID) string {
 	return unsafe.String(unsafe.SliceData(ss.buf[id.off:id.off+id.len]), id.len)
 }
 
 // store stores the input string in its own storage and returns a stringID
 // that can be used to retrieve the string.
-func (ss *stringStore) store(str string) stringID {
+func (ss *pathArena) store(str string) pathID {
 	s := len(str)
 	c := cap(ss.buf)
-	id := stringID{off: uint32(ss.off), len: uint32(s)}
+	id := pathID{off: uint32(ss.off), len: uint32(s)}
 	if s > 0 {
 		if ss.off+s > len(ss.buf) {
 			if ss.off+s >= c {
@@ -61,7 +68,7 @@ func (ss *stringStore) store(str string) stringID {
 
 // storePath normalizes and joins parent and child strings with the OS path separator
 // and returns the resulting stringID.
-func (ss *stringStore) storePath(parent, child string) stringID {
+func (ss *pathArena) storePath(parent, child string) pathID {
 	plen := len(parent)
 	clen := len(child)
 	sep := 0
@@ -78,7 +85,7 @@ func (ss *stringStore) storePath(parent, child string) stringID {
 		ss.buf = ss.buf[:ss.off+total]
 	}
 
-	id := stringID{off: uint32(ss.off), len: uint32(total)}
+	id := pathID{off: uint32(ss.off), len: uint32(total)}
 
 	copy(ss.buf[ss.off:ss.off+plen], parent)
 	if sep == 1 {

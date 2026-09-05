@@ -22,18 +22,18 @@ var (
 	ErrDanglingSymlink = errors.New("walkman: dangling/unresolved symlink")
 )
 
-type walkConf struct {
-	followLinks bool                // off by default
-	maxDepth    uint32              // 0 means unlimited
-	skipSet     map[string]struct{} // directories/files to skip from the result
-}
 
-// DirErr is one error encountered while producing a WalkResult.
-// Name identifies which file/dir caused the error, while
-// WalkResult.Dir is the directory being listed.
-type DirErr struct {
-	Name string
-	Err  error
+
+// walkItem is the input to each worker's Task function.
+// Each worker gets one of these, does the work on it, and then spawns
+// more work (if needed) by creating another walkItem.
+type walkItem struct {
+	path     stringID
+	Depth    uint16      // depth of this entry
+	Ino      uint64      // this directory's own inode (free from getdents64/d_ino)
+	Ancestor ancestorRef // zero value when followLinks is off
+	// when followLinks is on: locates the ancestorEntry,
+	// which has the ino, dev(from readDirRaw) pair and a link to it's parent
 }
 
 // WalkResult is one directory's outcome.
@@ -45,45 +45,131 @@ type DirErr struct {
 // Entries is nil only when the directory itself couldn't be read at all, in
 // which case Errs holds exactly that one failure.
 type WalkResult struct {
-	Dir     string
-	Entries []fs.DirEntry
-	Errs    []DirErr
+	dir     stringID
+	entries []Entry
+	errs    []DirErr
 }
 
-// walkItem is the input to each worker's Task function.
-// Each worker gets one of these, does the work on it, and then spawns
-// more work (if needed) by creating another walkItem.
-type walkItem struct {
-	depth uint32
-	leaf  *pathNode
+
+// DirErr is one error encountered while producing a WalkResult.
+// Name identifies which file/dir caused the error, while
+// WalkResult.Dir is the directory being listed.
+type DirErr struct {
+	name stringID
+	err  error
 }
 
-// pathNode is a linked list that goes from any walkItem (anything in the filesystem tree)
-// to its parent node and also stores the full path (starting from root) up to that node.
-// Used as path storage as well as to detect symlinks (Lstat each path as we go up the chain).
-type pathNode struct {
-	path   string
-	parent *pathNode
+func (derr DirErr) Name() string {}
+
+func (derr DirErr) Err() error {}
+
+
+// Entry / DirBatch: per-batch, offset-based, not persistent
+//
+// A DirBatch is built once by one worker from one
+// readDirRaw call and sent immediately to the external consumer,
+// it is never re-queued, never stolen, and nothing about it needs to outlive that
+// one send. So its Names buffer is fresh, small, and scoped to that single
+// batch, built inline as entries are read from the kernel buffer, and freed
+// by the GC once the caller is done with it
+
+// Entry is the fs.DirEntry-shaped, zero-alloc equivalent for one directory entry
+type Entry struct {
+	name stringID
+	typ  uint8 // DT_DIR, DT_REG, DT_LNK, DT_UNKNOWN, ...
+	ino  uint64
 }
 
-// dirKey identifies a directory by device+inode, stable across the
-// different paths that can reach the same directory (e.g. through a symlink).
-type dirKey struct {
-	dev, ino uint64
-}
+// Ino returns the entry's inode number, as reported by getdents64
+func (e Entry) Ino() uint64 { return e.ino }
 
-// statKey Lstat's path and returns its dirKey. Only called when followLinks is on,
-// and only against a resolved symlink target and the ancestors being checked against it.
-func statKey(path string) (dirKey, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return dirKey{}, err
+// IsDir reports whether the entry is a directory, per d_type. It does NOT
+// fall back to a stat call for DT_UNKNOWN, callers that need certainty
+// should stat explicitly
+func (e Entry) IsDir() bool { return e.typ == dtDir }
+
+// FileMode maps d_type to the corresponding fs.FileMode bits. DT_UNKNOWN
+// (and anything else this table doesn't recognize) deliberately maps to fs.ModeIrregular
+func (e Entry) FileMode() fs.FileMode {
+	switch e.typ {
+	case dtDir:
+		return fs.ModeDir
+	case dtLnk:
+		return fs.ModeSymlink
+	case dtReg:
+		return 0
+	default:
+		return fs.ModeIrregular
 	}
-	st, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return dirKey{}, ErrNoDevInoInfo
-	}
-	return dirKey{dev: uint64(st.Dev), ino: st.Ino}, nil
+}
+
+// DirBatch is one directory's result: the full path, the entries and any errors
+// Dir, Entries, and Errs are exported: the consumer directly needs all three
+type DirBatch struct {
+	dir     stringID  // this directory's full path
+	Entries []Entry // flat slice of entries
+	Errs    []DirErr // nil if no errors in this directory
+}
+
+// Name resolves e's leaf name against this batch's own names buffer. Takes
+// the batch as a receiver (rather than Entry holding a back-pointer)
+// specifically so Entry itself can stay a small, flat value with no pointer
+// fields (§4.4, §8.1).
+func (b *DirBatch) Name(e Entry) string {
+	return unsafe.String(&b.names[e.nameOffset], e.nameLen)
+}
+
+// entryView adapts an Entry + its owning DirBatch to satisfy fs.DirEntry.
+// Entry alone can't implement fs.DirEntry directly: fs.DirEntry's methods
+// take no extra arguments, but resolving a name or lazily stat-ing requires
+// the owning batch's names buffer and Dir path. entryView stays unexported —
+// it's a mechanism, not part of the public type surface — and is only ever
+// produced through DirBatch.DirEntry below.
+type entryView struct {
+	e Entry
+	b *DirBatch
+}
+
+func (v entryView) Name() string      { return v.b.Name(v.e) }
+func (v entryView) IsDir() bool       { return v.e.IsDir() }
+func (v entryView) Type() fs.FileMode { return v.e.FileMode() }
+
+func (v entryView) Info() (fs.FileInfo, error) {
+	// Lazy stat: fs.DirEntry.Info() is the one method that can't be answered
+	// from d_type/d_ino alone. Only paid by callers that actually need full
+	// fs.FileInfo (size, mtime, mode bits beyond type), and only per call,
+	// not per entry read. Lstat, not Stat: fs.DirEntry.Info() is documented
+	// to describe a symlink itself, not follow it.
+	return os.Lstat(filepath.Join(v.b.Dir, v.b.Name(v.e)))
+}
+
+var _ fs.DirEntry = entryView{}
+
+// DirEntry answered: DirBatch.Entries — plain []Entry — is what a consumer
+// gets by default. That's the zero-alloc type this whole rewrite exists to
+// produce, and it's what visit2/visitSym2 build directly with no conversion
+// step. entryView/fs.DirEntry is an *opt-in*, per-entry escape hatch for
+// interop with code that specifically wants a real fs.DirEntry (e.g. a
+// helper written against the standard library's shape), reached via:
+//
+//	de := batch.DirEntry(entry) // fs.DirEntry
+//
+// This is deliberately a one-at-a-time method, not a bulk
+// "func (b *DirBatch) AsDirEntries() []fs.DirEntry" — converting the whole
+// batch would box every Entry into an interface value, which is exactly the
+// per-entry heap allocation §2/§4 exist to eliminate. Keeping the conversion
+// per-call makes that cost visible and opt-in at each call site instead of
+// silently reintroduced for every consumer, including the ones that never
+// needed fs.DirEntry in the first place.
+func (b *DirBatch) DirEntry(e Entry) fs.DirEntry {
+	return entryView{e: e, b: b}
+}
+
+
+type walkConf struct {
+	followLinks bool                // off by default
+	maxDepth    uint32              // 0 means unlimited
+	skipSet     map[string]struct{} // directories/files to skip from the result
 }
 
 // PoolConfig exposes the underlying workerpool knobs
@@ -106,13 +192,19 @@ func DefaultPoolConfig() PoolConfig {
 }
 
 type workerState struct {
-	// scratch space for symlink detection
-	dirBuf []dirKey
-	// stack of inodes
-	// storage for all paths this worker computed
-	pathStore stringStore
+	// raw buf for the getdents64 syscall. Sized to getdentsBufSize (32 KB, matching readdir_linux.go)
+	buf [getdentsBufSize]byte
+
+	// append-only storage for all directory paths this worker computes
+	// Persistent for the worker's lifetime
+	pathStore pathArena
+
+	// per-worker ancestor chain storage for symlink-cycle detection
+	// Unused, and never grown when followLinks is off
+	ancestors ancestorArena
+
 	// scratch buffer for spawning child items
-	spawnBuf []walkItem
+	spawnBuf []walkItem2
 }
 
 type Walkman struct {

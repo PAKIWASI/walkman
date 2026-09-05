@@ -9,6 +9,12 @@ const (
 	getdentsBufSize  = 32 * 1024 // 32 KB per worker
 	sysGetdents64    = syscall.SYS_GETDENTS64
 	direntNameOffset = 19 // uint64(8) + int64(8) + uint16(2) + uint8(1) = 19, no padding on this ABI
+
+	// d_type values, per Linux's linux_dirent64 ABI
+	dtUnknown uint8 = 0
+	dtDir     uint8 = 4
+	dtReg     uint8 = 8
+	dtLnk     uint8 = 10
 )
 
 type linuxDirent64 struct {
@@ -20,10 +26,11 @@ type linuxDirent64 struct {
 	// (we get a variable length c array and Name slice will point to it)
 }
 
-// readDirRaw reads directory entries directly via SYS_GETDENTS64 into worker's scratch buffer
+// readDirRaw reads directory entries directly via SYS_GETDENTS64 into worker's scratch buffer.
 func readDirRaw(
 	dirPath string, // the directory to read
 	buf []byte, // per worker scratch buf
+	devOut *uint64, // non-nil only in followLinks mode; filled with this directory's device number
 	onEntry func(name []byte, dType uint8, ino uint64) error, // storage func (closes on persistant container?)
 ) error {
 	// Open directory with O_DIRECTORY and O_CLOEXEC
@@ -32,6 +39,15 @@ func readDirRaw(
 		return err
 	}
 	defer syscall.Close(fd)
+
+	// get the dev no out if symlink following is on
+	if devOut != nil {
+		var st syscall.Stat_t
+		if err := syscall.Fstat(fd, &st); err != nil {
+			return err
+		}
+		*devOut = uint64(st.Dev)
+	}
 
 	for {
 		// this syscall places directory entries into the passed buf, as many that can fit

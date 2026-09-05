@@ -30,7 +30,7 @@ func Test_readDirRaw(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotErr := readDirRaw(tt.dirPath, buf, onEntry)
+			gotErr := readDirRaw(tt.dirPath, buf, nil, onEntry)
 			if gotErr != nil {
 				t.Errorf("readDirRaw() failed: %v", gotErr)
 			}

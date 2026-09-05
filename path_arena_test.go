@@ -52,7 +52,7 @@ func TestStringStore_GrowthUnderHighVolume(t *testing.T) {
 	const count = 5000
 
 	type stored struct {
-		id   stringID
+		id   pathID
 		want string
 	}
 
