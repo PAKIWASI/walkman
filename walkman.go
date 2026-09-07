@@ -57,7 +57,7 @@ func (derr DirErr) Err() error { return derr.err }
 
 // Entry is the fs.DirEntry-shaped, zero-alloc equivalent for one directory entry
 type Entry struct {
-	parentDir *stringID
+	parentDir stringID
 	name      stringID
 	ino       uint64
 	typ       uint8 // DT_DIR, DT_REG, DT_LNK, DT_UNKNOWN, ...
@@ -90,14 +90,12 @@ func (e Entry) FileMode() fs.FileMode {
 	}
 }
 
-// lazy entry info 
+// lazy entry info
 func (e Entry) Info() (fs.FileInfo, error) {
 	return os.Lstat(filepath.Join(e.parentDir.string(), e.Name()))
 }
 
 var _ fs.DirEntry = Entry{}
-
-
 
 // DirBatch is one directory's result: the full path, the entries and any errors
 //
@@ -114,8 +112,6 @@ type DirBatch struct {
 }
 
 func (b *DirBatch) Dir() string { return b.dir.string() }
-
-
 
 type walkConf struct {
 	followLinks bool                // off by default
@@ -138,7 +134,7 @@ func DefaultPoolConfig() PoolConfig {
 	return PoolConfig{
 		PoolSize:         runtime.GOMAXPROCS(0),
 		InitialWorkerCap: 32,
-		ResultBuffSize:   128,
+		ResultBuffSize:   128, // TODO: is this enough? i dont want this to block. ever.
 	}
 }
 
@@ -266,7 +262,7 @@ func (w *Walkman) visit(
 	workerID int,
 	item walkItem,
 	res chan<- DirBatch,
-	spawn func(...walkItem), // TODO: what's the cost of this variadic func
+	spawn func(...walkItem),
 ) error {
 	path := item.path.string()
 	dirs, err := readDir(path)
@@ -322,15 +318,31 @@ func (w *Walkman) visit2(
 	spawn func(...walkItem),
 ) error {
 	path := item.path.string()
-	worker := w.workers[workerID]
-	err := readDirRaw(path, worker.buf, nil, w.conf.skipSet, func(name []byte, dType uint8, ino uint64) error {
-		worker.paths.storeByte(name)
-		worker.results.storeEntry(Entry{})
-	})
+	worker := &w.workers[workerID]
+	mark := worker.results.getEntryMark()
+	err := readDirRaw(path, worker.buf[:0], nil, w.conf.skipSet,
+		func(name []byte, dType uint8, ino uint64) error {
+			off, l := worker.paths.storeByte(name)
+			worker.results.storeEntry(
+				Entry{
+					parentDir: item.path,
+					name:      stringID{store: &worker.paths, PathLen: l, PathOff: off},
+					ino:       ino,
+					typ:       dType,
+				})
+			return nil
+		})
 	if err != nil {
-		return err
+		// Same contract as visit: the directory itself couldn't be read.
+		// One DirErr, not a pool-wide abort.
+		res <- DirBatch{dir: item.path, Errs: []DirErr{{name: item.path, err: err}}}
+		return nil
 	}
-	
+
+	entries := worker.results.sliceEntry(mark)
+	res <- DirBatch{dir: item.path, Entries: entries}
+
+
 }
 
 // visitSym is visit's counterpart for followLinks: same item type, same

@@ -29,10 +29,10 @@ type linuxDirent64 struct {
 // readDirRaw reads directory entries directly via SYS_GETDENTS64 into worker's scratch buffer.
 func readDirRaw(
 	dirPath string, // the directory to read
-	buf [getdentsBufSize]byte, // per worker scratch buf
+	buf []byte, // per worker scratch buf
 	devOut *uint64, // non-nil only in followLinks mode; filled with this directory's device number
 	skip map[string]struct{},
-	onEntry func(name []byte, dType uint8, ino uint64) error, // TODO: don't pay the closure cost ?
+	onEntry func(name []byte, dType uint8, ino uint64) error,
 ) error {
 	// Open directory with O_DIRECTORY and O_CLOEXEC
 	fd, err := syscall.Open(dirPath, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
@@ -94,10 +94,9 @@ func readDirRaw(
 			if (len(name) == 1 && name[0] == '.') ||
 				(len(name) == 2 && name[0] == '.' && name[1] == '.') {
 				continue
-			} 
-			// TODO: modify skip map to store []byte instead of string
+			}
 			// filter what the user skipped explicitly
-			if _, ok := skip[unsafe.String(unsafe.SliceData(name), len(name))]; ok {
+			if _, ok := skip[byteToString(name)]; ok {
 				continue
 			}
 

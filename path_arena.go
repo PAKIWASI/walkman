@@ -29,6 +29,10 @@ func (id stringID) string() string {
 	return id.store.retrieve(id.PathOff, id.PathLen)
 }
 
+func byteToString(buf []byte) string {
+	return unsafe.String(unsafe.SliceData(buf), len(buf))
+}
+
 // newStringArena initializes and returns a new stringStore.
 // cap controls the initial capacity of the underlying buffer;
 // passing cap <= 0 sets the buffer capacity to stringMinimumCap (1024).
@@ -50,6 +54,7 @@ func (pa *pathArena) retrieve(off, len uint32) string {
 func (pa *pathArena) store(name string) (uint32, uint32) {
 	s := len(name)
 	c := cap(pa.buf)
+	retOff := uint32(pa.off)
 	if s > 0 {
 		if pa.off+s > len(pa.buf) {
 			if pa.off+s >= c {
@@ -62,13 +67,14 @@ func (pa *pathArena) store(name string) (uint32, uint32) {
 		pa.off += s
 	}
 
-	return uint32(pa.off), uint32(s)
+	return retOff, uint32(s)
 }
 
 // TODO: methods can have generics in gov1.27, idk wht's wrong
 func (pa *pathArena) storeByte(name []byte) (uint32, uint32) {
 	s := len(name)
 	c := cap(pa.buf)
+	retOff := uint32(pa.off)
 	if s > 0 {
 		if pa.off+s > len(pa.buf) {
 			if pa.off+s >= c {
@@ -80,7 +86,7 @@ func (pa *pathArena) storeByte(name []byte) (uint32, uint32) {
 		pa.off += s
 	}
 
-	return uint32(pa.off), uint32(s)
+	return retOff, uint32(s)
 }
 
 
