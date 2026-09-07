@@ -22,34 +22,17 @@ var (
 	ErrDanglingSymlink = errors.New("walkman: dangling/unresolved symlink")
 )
 
-
-
 // walkItem is the input to each worker's Task function.
 // Each worker gets one of these, does the work on it, and then spawns
 // more work (if needed) by creating another walkItem.
 type walkItem struct {
 	path     stringID
-	Depth    uint16      // depth of this entry
+	Depth    uint32      // depth of this entry
 	Ino      uint64      // this directory's own inode (free from getdents64/d_ino)
 	Ancestor ancestorRef // zero value when followLinks is off
 	// when followLinks is on: locates the ancestorEntry,
 	// which has the ino, dev(from readDirRaw) pair and a link to it's parent
 }
-
-// WalkResult is one directory's outcome.
-//
-// Entries and Errs are not mutually exclusive: a directory can list
-// successfully (Entries populated) while individual entries inside it still
-// had problems (e.g. one dangling symlink, one detected cycle), each
-// recorded as its own DirErr in Errs alongside the otherwise complete Entries.
-// Entries is nil only when the directory itself couldn't be read at all, in
-// which case Errs holds exactly that one failure.
-type WalkResult struct {
-	dir     stringID
-	entries []Entry
-	errs    []DirErr
-}
-
 
 // DirErr is one error encountered while producing a WalkResult.
 // Name identifies which file/dir caused the error, while
@@ -59,10 +42,9 @@ type DirErr struct {
 	err  error
 }
 
-func (derr DirErr) Name() string {}
+func (derr DirErr) Name() string { return derr.name.string() }
 
-func (derr DirErr) Err() error {}
-
+func (derr DirErr) Err() error { return derr.err }
 
 // Entry / DirBatch: per-batch, offset-based, not persistent
 //
@@ -75,10 +57,13 @@ func (derr DirErr) Err() error {}
 
 // Entry is the fs.DirEntry-shaped, zero-alloc equivalent for one directory entry
 type Entry struct {
-	name stringID
-	typ  uint8 // DT_DIR, DT_REG, DT_LNK, DT_UNKNOWN, ...
-	ino  uint64
+	parentDir *stringID
+	name      stringID
+	ino       uint64
+	typ       uint8 // DT_DIR, DT_REG, DT_LNK, DT_UNKNOWN, ...
 }
+
+func (e Entry) Name() string { return e.name.string() }
 
 // Ino returns the entry's inode number, as reported by getdents64
 func (e Entry) Ino() uint64 { return e.ino }
@@ -87,6 +72,8 @@ func (e Entry) Ino() uint64 { return e.ino }
 // fall back to a stat call for DT_UNKNOWN, callers that need certainty
 // should stat explicitly
 func (e Entry) IsDir() bool { return e.typ == dtDir }
+
+func (e Entry) Type() fs.FileMode { return e.FileMode() }
 
 // FileMode maps d_type to the corresponding fs.FileMode bits. DT_UNKNOWN
 // (and anything else this table doesn't recognize) deliberately maps to fs.ModeIrregular
@@ -103,67 +90,31 @@ func (e Entry) FileMode() fs.FileMode {
 	}
 }
 
+// lazy entry info 
+func (e Entry) Info() (fs.FileInfo, error) {
+	return os.Lstat(filepath.Join(e.parentDir.string(), e.Name()))
+}
+
+var _ fs.DirEntry = Entry{}
+
+
+
 // DirBatch is one directory's result: the full path, the entries and any errors
-// Dir, Entries, and Errs are exported: the consumer directly needs all three
+//
+// Entries and Errs are not mutually exclusive: a directory can list
+// successfully (Entries populated) while individual entries inside it still
+// had problems (e.g. one dangling symlink, one detected cycle), each
+// recorded as its own DirErr in Errs alongside the otherwise complete Entries.
+// Entries is nil only when the directory itself couldn't be read at all, in
+// which case Errs holds exactly that one failure.
 type DirBatch struct {
-	dir     stringID  // this directory's full path
-	Entries []Entry // flat slice of entries
+	dir     stringID // this directory's full path
+	Entries []Entry  // flat slice of entries
 	Errs    []DirErr // nil if no errors in this directory
 }
 
-// Name resolves e's leaf name against this batch's own names buffer. Takes
-// the batch as a receiver (rather than Entry holding a back-pointer)
-// specifically so Entry itself can stay a small, flat value with no pointer
-// fields (§4.4, §8.1).
-func (b *DirBatch) Name(e Entry) string {
-	return unsafe.String(&b.names[e.nameOffset], e.nameLen)
-}
+func (b *DirBatch) Dir() string { return b.dir.string() }
 
-// entryView adapts an Entry + its owning DirBatch to satisfy fs.DirEntry.
-// Entry alone can't implement fs.DirEntry directly: fs.DirEntry's methods
-// take no extra arguments, but resolving a name or lazily stat-ing requires
-// the owning batch's names buffer and Dir path. entryView stays unexported —
-// it's a mechanism, not part of the public type surface — and is only ever
-// produced through DirBatch.DirEntry below.
-type entryView struct {
-	e Entry
-	b *DirBatch
-}
-
-func (v entryView) Name() string      { return v.b.Name(v.e) }
-func (v entryView) IsDir() bool       { return v.e.IsDir() }
-func (v entryView) Type() fs.FileMode { return v.e.FileMode() }
-
-func (v entryView) Info() (fs.FileInfo, error) {
-	// Lazy stat: fs.DirEntry.Info() is the one method that can't be answered
-	// from d_type/d_ino alone. Only paid by callers that actually need full
-	// fs.FileInfo (size, mtime, mode bits beyond type), and only per call,
-	// not per entry read. Lstat, not Stat: fs.DirEntry.Info() is documented
-	// to describe a symlink itself, not follow it.
-	return os.Lstat(filepath.Join(v.b.Dir, v.b.Name(v.e)))
-}
-
-var _ fs.DirEntry = entryView{}
-
-// DirEntry answered: DirBatch.Entries — plain []Entry — is what a consumer
-// gets by default. That's the zero-alloc type this whole rewrite exists to
-// produce, and it's what visit2/visitSym2 build directly with no conversion
-// step. entryView/fs.DirEntry is an *opt-in*, per-entry escape hatch for
-// interop with code that specifically wants a real fs.DirEntry (e.g. a
-// helper written against the standard library's shape), reached via:
-//
-//	de := batch.DirEntry(entry) // fs.DirEntry
-//
-// This is deliberately a one-at-a-time method, not a bulk
-// "func (b *DirBatch) AsDirEntries() []fs.DirEntry" — converting the whole
-// batch would box every Entry into an interface value, which is exactly the
-// per-entry heap allocation §2/§4 exist to eliminate. Keeping the conversion
-// per-call makes that cost visible and opt-in at each call site instead of
-// silently reintroduced for every consumer, including the ones that never
-// needed fs.DirEntry in the first place.
-func (b *DirBatch) DirEntry(e Entry) fs.DirEntry {
-	return entryView{e: e, b: b}
-}
 
 
 type walkConf struct {
@@ -194,22 +145,19 @@ func DefaultPoolConfig() PoolConfig {
 type workerState struct {
 	// raw buf for the getdents64 syscall. Sized to getdentsBufSize (32 KB, matching readdir_linux.go)
 	buf [getdentsBufSize]byte
-
 	// append-only storage for all directory paths this worker computes
 	// Persistent for the worker's lifetime
 	pathStore pathArena
-
 	// per-worker ancestor chain storage for symlink-cycle detection
 	// Unused, and never grown when followLinks is off
 	ancestors ancestorArena
-
 	// scratch buffer for spawning child items
-	spawnBuf []walkItem2
+	spawnBuf []walkItem
 }
 
 type Walkman struct {
 	conf walkConf
-	pool *wsp.WorkerPool[walkItem, WalkResult]
+	pool *wsp.WorkerPool[walkItem, DirBatch]
 	// per-worker state keyed by workerID
 	workers []workerState
 }
@@ -245,7 +193,6 @@ func NewWalkmanWithConfig(
 	w.workers = make([]workerState, pc.PoolSize)
 	if w.conf.followLinks {
 		for i := range w.workers {
-			w.workers[i].dirBuf = make([]dirKey, 16)
 		}
 	}
 	for i := range w.workers {
@@ -314,7 +261,7 @@ func (w *Walkman) visit(
 	_ context.Context,
 	workerID int,
 	item walkItem,
-	res chan<- WalkResult,
+	res chan<- DirBatch,
 	spawn func(...walkItem),
 ) error {
 	path := item.leaf.path
@@ -324,7 +271,7 @@ func (w *Walkman) visit(
 		// one item, not a reason to kill every other worker in the pool.
 		// Entries stays nil: the directory itself couldn't be read at all, so
 		// there's nothing else this result can carry.
-		res <- WalkResult{Dir: path, Errs: []DirErr{{Name: path, Err: err}}}
+		res <- DirBatch{Dir: path, Errs: []DirErr{{Name: path, Err: err}}}
 		return nil
 	}
 
@@ -335,7 +282,7 @@ func (w *Walkman) visit(
 
 	// Send to channel. We don't care if it's dirs, files or symlinks;
 	// this task doesn't follow symlinks.
-	res <- WalkResult{Dir: path, Entries: dirs}
+	res <- DirBatch{Dir: path, Entries: dirs}
 
 	// We have reached max depth, don't spawn child dirs, stop here.
 	if w.conf.maxDepth != 0 && item.depth+1 > w.conf.maxDepth {
@@ -373,13 +320,13 @@ func (w *Walkman) visitSym(
 	_ context.Context,
 	workerID int,
 	item walkItem,
-	res chan<- WalkResult,
+	res chan<- DirBatch,
 	spawn func(...walkItem),
 ) error {
 	path := item.leaf.path
 	dirs, err := readDir(path)
 	if err != nil {
-		res <- WalkResult{Dir: path, Errs: []DirErr{{Name: path, Err: err}}}
+		res <- DirBatch{Dir: path, Errs: []DirErr{{Name: path, Err: err}}}
 		return nil
 	}
 
@@ -388,7 +335,7 @@ func (w *Walkman) visitSym(
 		dirs = filterSkipped(dirs, w.conf.skipSet)
 	}
 
-	result := WalkResult{Dir: path}
+	result := DirBatch{Dir: path}
 
 	worker := &w.workers[workerID]
 	ancestorsResolved := false
@@ -475,7 +422,7 @@ func (w *Walkman) visitSym(
 // The channel closes once every worker has finished (no work left, or a
 // fatal error occurred). Call Wait after draining the channel to get the
 // terminal error, if any.
-func (w *Walkman) Walk(root string) <-chan WalkResult {
+func (w *Walkman) Walk(root string) <-chan DirBatch {
 	// Clean once, here, so every child path built during the walk (via
 	// join, not filepath.Join) can assume its parent is already clean
 	// without re-running filepath.Clean per entry.

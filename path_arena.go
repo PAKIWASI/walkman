@@ -17,17 +17,17 @@ type pathArena struct {
 	off int
 }
 
-type pathID struct {
-	len uint32
-	off uint32
-}
-
+// global id for a string with info about which
+// worker's pathArena the string belongs to
 type stringID struct {
-	ArenaWorkerID uint16 // which worker's pathStore PathOff/PathLen resolve against
-	PathLen       uint16 // length of the path
-	PathOff       uint32 // offset into that worker's path arena
+	store   *pathArena
+	PathLen uint32 // length of the path
+	PathOff uint32 // offset into that worker's path arena
 }
 
+func (id stringID) string() string {
+	return id.store.retrieve(id.PathOff, id.PathLen)
+}
 
 // newStringStore initializes and returns a new stringStore.
 // cap controls the initial capacity of the underlying buffer;
@@ -41,34 +41,33 @@ func newStringStore(cap int) pathArena {
 	return ps
 }
 
-func (ss *pathArena) retrieve(id pathID) string {
-	return unsafe.String(unsafe.SliceData(ss.buf[id.off:id.off+id.len]), id.len)
+func (pa *pathArena) retrieve(off, len uint32) string {
+	return unsafe.String(unsafe.SliceData(pa.buf[off:off+len]), len)
 }
 
 // store stores the input string in its own storage and returns a stringID
 // that can be used to retrieve the string.
-func (ss *pathArena) store(str string) pathID {
+func (pa *pathArena) store(str string) (uint32, uint32) {
 	s := len(str)
-	c := cap(ss.buf)
-	id := pathID{off: uint32(ss.off), len: uint32(s)}
+	c := cap(pa.buf)
 	if s > 0 {
-		if ss.off+s > len(ss.buf) {
-			if ss.off+s >= c {
-				ss.buf = slices.Grow(ss.buf, 2*c+s)
+		if pa.off+s > len(pa.buf) {
+			if pa.off+s >= c {
+				pa.buf = slices.Grow(pa.buf, 2*c+s)
 			}
-			ss.buf = ss.buf[:ss.off+s]
+			pa.buf = pa.buf[:pa.off+s]
 		}
 
-		copy(ss.buf[ss.off:ss.off+s], str)
-		ss.off += s
+		copy(pa.buf[pa.off:pa.off+s], str)
+		pa.off += s
 	}
 
-	return id
+	return uint32(pa.off), uint32(s)
 }
 
 // storePath normalizes and joins parent and child strings with the OS path separator
 // and returns the resulting stringID.
-func (ss *pathArena) storePath(parent, child string) pathID {
+func (pa *pathArena) storePath(parent, child string) (uint32, uint32) {
 	plen := len(parent)
 	clen := len(child)
 	sep := 0
@@ -77,24 +76,22 @@ func (ss *pathArena) storePath(parent, child string) pathID {
 	}
 	total := plen + sep + clen
 
-	c := cap(ss.buf)
-	if ss.off+total > len(ss.buf) {
-		if ss.off+total >= c {
-			ss.buf = slices.Grow(ss.buf, 2*c+total)
+	c := cap(pa.buf)
+	if pa.off+total > len(pa.buf) {
+		if pa.off+total >= c {
+			pa.buf = slices.Grow(pa.buf, 2*c+total)
 		}
-		ss.buf = ss.buf[:ss.off+total]
+		pa.buf = pa.buf[:pa.off+total]
 	}
 
-	id := pathID{off: uint32(ss.off), len: uint32(total)}
+	retOff := uint32(pa.off)
 
-	copy(ss.buf[ss.off:ss.off+plen], parent)
+	copy(pa.buf[pa.off:pa.off+plen], parent)
 	if sep == 1 {
-		ss.buf[ss.off+plen] = os.PathSeparator
+		pa.buf[pa.off+plen] = os.PathSeparator
 	}
-	copy(ss.buf[ss.off+plen+sep:ss.off+total], child)
-	ss.off += total
+	copy(pa.buf[pa.off+plen+sep:pa.off+total], child)
+	pa.off += total
 
-	return id
+	return retOff, uint32(total)
 }
-
-
