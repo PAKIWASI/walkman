@@ -7,7 +7,7 @@ import (
 )
 
 const (
-	stringMinimumCap = 1024
+	pathArenaMinimumCap = 1024
 )
 
 // pathArena implements a container that stores strings efficiently in the heap.
@@ -29,13 +29,13 @@ func (id stringID) string() string {
 	return id.store.retrieve(id.PathOff, id.PathLen)
 }
 
-// newStringStore initializes and returns a new stringStore.
+// newStringArena initializes and returns a new stringStore.
 // cap controls the initial capacity of the underlying buffer;
 // passing cap <= 0 sets the buffer capacity to stringMinimumCap (1024).
-func newStringStore(cap int) pathArena {
+func newStringArena(cap int) pathArena {
 	ps := pathArena{}
 	if cap <= 0 {
-		cap = stringMinimumCap
+		cap = pathArenaMinimumCap
 	}
 	ps.buf = make([]byte, cap)
 	return ps
@@ -47,8 +47,8 @@ func (pa *pathArena) retrieve(off, len uint32) string {
 
 // store stores the input string in its own storage and returns a stringID
 // that can be used to retrieve the string.
-func (pa *pathArena) store(str string) (uint32, uint32) {
-	s := len(str)
+func (pa *pathArena) store(name string) (uint32, uint32) {
+	s := len(name)
 	c := cap(pa.buf)
 	if s > 0 {
 		if pa.off+s > len(pa.buf) {
@@ -58,12 +58,32 @@ func (pa *pathArena) store(str string) (uint32, uint32) {
 			pa.buf = pa.buf[:pa.off+s]
 		}
 
-		copy(pa.buf[pa.off:pa.off+s], str)
+		copy(pa.buf[pa.off:pa.off+s], name)
 		pa.off += s
 	}
 
 	return uint32(pa.off), uint32(s)
 }
+
+// TODO: methods can have generics in gov1.27, idk wht's wrong
+func (pa *pathArena) storeByte(name []byte) (uint32, uint32) {
+	s := len(name)
+	c := cap(pa.buf)
+	if s > 0 {
+		if pa.off+s > len(pa.buf) {
+			if pa.off+s >= c {
+				pa.buf = slices.Grow(pa.buf, 2*c+s)
+			}
+			pa.buf = pa.buf[:pa.off+s]
+		}
+		copy(pa.buf[pa.off:pa.off+s], name)
+		pa.off += s
+	}
+
+	return uint32(pa.off), uint32(s)
+}
+
+
 
 // storePath normalizes and joins parent and child strings with the OS path separator
 // and returns the resulting stringID.

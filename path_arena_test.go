@@ -18,7 +18,7 @@ func TestStringStore_StorePath(t *testing.T) {
 		{"dot_parent", ".", "child", "." + sep + "child"},
 	}
 
-	p := newStringStore(0)
+	p := newStringArena(0)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := p.storePath(tt.parent, tt.child)
@@ -30,7 +30,7 @@ func TestStringStore_StorePath(t *testing.T) {
 }
 
 func TestStringStore_StoreAndRetrieve(t *testing.T) {
-	p := newStringStore(0)
+	p := newStringArena(0)
 
 	id1 := p.store("hello")
 	id2 := p.store("world")
@@ -48,7 +48,7 @@ func TestStringStore_StoreAndRetrieve(t *testing.T) {
 }
 
 func TestStringStore_GrowthUnderHighVolume(t *testing.T) {
-	p := newStringStore(64) // tiny initial capacity to force many resizes
+	p := newStringArena(64) // tiny initial capacity to force many resizes
 	const count = 5000
 
 	type stored struct {
@@ -74,7 +74,7 @@ func TestStringStore_GrowthUnderHighVolume(t *testing.T) {
 }
 
 func TestStringStore_DeepNesting(t *testing.T) {
-	p := newStringStore(0)
+	p := newStringArena(0)
 	current := "root"
 
 	for level := 1; level <= 60; level++ {

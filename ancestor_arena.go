@@ -1,7 +1,10 @@
 package walkman
 
+const ancestorArenaMinimumCap = 16
+
 // noParent marks the root of a chain
 const noParent = ^uint16(0)
+
 
 // ancestorRef: two plain integers
 // Resolved by indexing into workers[ownerID].ancestors
@@ -21,6 +24,15 @@ type ancestorEntry struct {
 // detection under work stealing amortized append, indices stable across growth
 type ancestorArena struct {
 	entries []ancestorEntry
+}
+
+func newAncestorArena(cap int) ancestorArena {
+	if cap <= 0 {
+		cap = ancestorArenaMinimumCap
+	}
+	return ancestorArena{
+		entries: make([]ancestorEntry, cap),
+	}
 }
 
 // pushAncestor links a new ancestor node onto workerID's own arena and

@@ -29,9 +29,10 @@ type linuxDirent64 struct {
 // readDirRaw reads directory entries directly via SYS_GETDENTS64 into worker's scratch buffer.
 func readDirRaw(
 	dirPath string, // the directory to read
-	buf []byte, // per worker scratch buf
+	buf [getdentsBufSize]byte, // per worker scratch buf
 	devOut *uint64, // non-nil only in followLinks mode; filled with this directory's device number
-	onEntry func(name []byte, dType uint8, ino uint64) error, // storage func (closes on persistant container?)
+	skip map[string]struct{},
+	onEntry func(name []byte, dType uint8, ino uint64) error, // TODO: don't pay the closure cost ?
 ) error {
 	// Open directory with O_DIRECTORY and O_CLOEXEC
 	fd, err := syscall.Open(dirPath, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
@@ -90,12 +91,19 @@ func readDirRaw(
 			name := nameBytes[:nameLen] // make a slice that points to the actual string (without NULL)
 
 			// Filter "." and ".." entries in-place
-			if !(len(name) == 1 && name[0] == '.') &&
-				!(len(name) == 2 && name[0] == '.' && name[1] == '.') {
-				// save the info we need somewhere (the file name, the type hint and the inode)
-				if err := onEntry(name, dent.Type, dent.Ino); err != nil {
-					return err
-				}
+			if (len(name) == 1 && name[0] == '.') ||
+				(len(name) == 2 && name[0] == '.' && name[1] == '.') {
+				continue
+			} 
+			// TODO: modify skip map to store []byte instead of string
+			// filter what the user skipped explicitly
+			if _, ok := skip[unsafe.String(unsafe.SliceData(name), len(name))]; ok {
+				continue
+			}
+
+			// save the info we need somewhere (the file name, the type hint and the inode)
+			if err := onEntry(name, dent.Type, dent.Ino); err != nil {
+				return err
 			}
 
 			pos += reclen // increment to the next record

@@ -147,10 +147,12 @@ type workerState struct {
 	buf [getdentsBufSize]byte
 	// append-only storage for all directory paths this worker computes
 	// Persistent for the worker's lifetime
-	pathStore pathArena
+	paths pathArena
 	// per-worker ancestor chain storage for symlink-cycle detection
 	// Unused, and never grown when followLinks is off
 	ancestors ancestorArena
+
+	results resultArena
 	// scratch buffer for spawning child items
 	spawnBuf []walkItem
 }
@@ -193,10 +195,12 @@ func NewWalkmanWithConfig(
 	w.workers = make([]workerState, pc.PoolSize)
 	if w.conf.followLinks {
 		for i := range w.workers {
+			w.workers[i].ancestors = newAncestorArena(0)
 		}
 	}
 	for i := range w.workers {
-		w.workers[i].pathStore = newStringStore(0)
+		w.workers[i].paths = newStringArena(0)
+		w.workers[i].results = newResultArena(0, 0)
 		w.workers[i].spawnBuf = make([]walkItem, 8)
 	}
 
@@ -223,14 +227,14 @@ func NewWalkmanWithConfig(
 // using the File.ReadDir(-1) form rather than the package-level os.ReadDir,
 // which sorts by filename. That sort is wasted work here since results
 // are consumed by directory, not in a global sorted order anyway.
-func readDir(name string) ([]fs.DirEntry, error) {
-	f, err := os.Open(name)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	return f.ReadDir(-1)
-}
+// func readDir(name string) ([]fs.DirEntry, error) {
+// 	f, err := os.Open(name)
+// 	if err != nil {
+// 		return nil, err
+// 	}
+// 	defer f.Close()
+// 	return f.ReadDir(-1)
+// }
 
 // filterSkipped removes, in place and without preserving order, every
 // entry whose Name() is in skip. It is an in-place swap-delete.
@@ -249,7 +253,7 @@ func filterSkipped(dirs []fs.DirEntry, skip map[string]struct{}) []fs.DirEntry {
 
 // newPath stores a path in this worker's storage and returns a string slice referencing it.
 func (w *Walkman) newPath(workerID int, parent, child string) string {
-	pathStore := &w.workers[workerID].pathStore
+	pathStore := &w.workers[workerID].paths
 	return pathStore.retrieve(pathStore.storePath(parent, child))
 }
 
@@ -262,9 +266,9 @@ func (w *Walkman) visit(
 	workerID int,
 	item walkItem,
 	res chan<- DirBatch,
-	spawn func(...walkItem),
+	spawn func(...walkItem), // TODO: what's the cost of this variadic func
 ) error {
-	path := item.leaf.path
+	path := item.path.string()
 	dirs, err := readDir(path)
 	if err != nil {
 		// A permission-denied (or similar) directory is a fact about that
@@ -308,6 +312,25 @@ func (w *Walkman) visit(
 	}
 
 	return nil
+}
+
+func (w *Walkman) visit2(
+	_ context.Context,
+	workerID int,
+	item walkItem,
+	res chan<- DirBatch,
+	spawn func(...walkItem),
+) error {
+	path := item.path.string()
+	worker := w.workers[workerID]
+	err := readDirRaw(path, worker.buf, nil, w.conf.skipSet, func(name []byte, dType uint8, ino uint64) error {
+		worker.paths.storeByte(name)
+		worker.results.storeEntry(Entry{})
+	})
+	if err != nil {
+		return err
+	}
+	
 }
 
 // visitSym is visit's counterpart for followLinks: same item type, same
