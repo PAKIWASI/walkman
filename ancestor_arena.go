@@ -3,13 +3,13 @@ package walkman
 const ancestorArenaMinimumCap = 16
 
 // noParent marks the root of a chain
-const noParent = ^uint16(0)
+const noParent = ^uint32(0)
 
 
 // ancestorRef: two plain integers
 // Resolved by indexing into workers[ownerID].ancestors
 type ancestorRef struct {
-	ownerID uint16 // which worker's ancestorArena this points into
+	ownerID uint32 // which worker's ancestorArena this points into
 	idx     uint32 // index into that arena
 }
 
@@ -46,7 +46,7 @@ func (w *Walkman) pushAncestor(workerID int, ino, dev uint64, parent ancestorRef
 	arena := &w.workers[workerID].ancestors
 	idx := uint32(len(arena.entries))
 	arena.entries = append(arena.entries, ancestorEntry{ino: ino, dev: dev, parent: parent})
-	return ancestorRef{ownerID: uint16(workerID), idx: idx}
+	return ancestorRef{ownerID: uint32(workerID), idx: idx}
 }
 
 // hasCycle walks the ancestor chain starting at ref, comparing (dev, ino)

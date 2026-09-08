@@ -21,9 +21,9 @@ func TestStringStore_StorePath(t *testing.T) {
 	p := newStringArena(0)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := p.storePath(tt.parent, tt.child)
+			got := p.joinAndStorePath(tt.parent, tt.child)
 			if str := p.retrieve(got); str != tt.want {
-				t.Errorf("storePath(%q, %q) = %q, want %q", tt.parent, tt.child, str, tt.want)
+				t.Errorf("joinAndStorePath(%q, %q) = %q, want %q", tt.parent, tt.child, str, tt.want)
 			}
 		})
 	}
@@ -61,7 +61,7 @@ func TestStringStore_GrowthUnderHighVolume(t *testing.T) {
 		parent := "root/dir" + itoa(i)
 		child := "leaf" + itoa(i) + ".txt"
 		want := parent + string(os.PathSeparator) + child
-		id := p.storePath(parent, child)
+		id := p.joinAndStorePath(parent, child)
 		items = append(items, stored{id: id, want: want})
 	}
 
@@ -80,7 +80,7 @@ func TestStringStore_DeepNesting(t *testing.T) {
 	for level := 1; level <= 60; level++ {
 		child := "level" + itoa(level)
 		want := current + string(os.PathSeparator) + child
-		id := p.storePath(current, child)
+		id := p.joinAndStorePath(current, child)
 		if got := p.retrieve(id); got != want {
 			t.Fatalf("level %d: retrieve = %q, want %q", level, got, want)
 		}

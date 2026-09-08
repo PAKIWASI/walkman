@@ -9,8 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
-	"syscall"
 
 	wsp "github.com/PAKIWASI/workstealpool"
 )
@@ -27,11 +25,12 @@ var (
 // more work (if needed) by creating another walkItem.
 type walkItem struct {
 	path     stringID
-	Depth    uint32      // depth of this entry
-	Ino      uint64      // this directory's own inode (free from getdents64/d_ino)
-	Ancestor ancestorRef // zero value when followLinks is off
+	depth    uint32      // depth of this entry
+	ancestor ancestorRef // zero value when followLinks is off
 	// when followLinks is on: locates the ancestorEntry,
 	// which has the ino, dev(from readDirRaw) pair and a link to it's parent
+	// TODO: why does the walkItem carry the ino number??
+	// ino      uint64      // this directory's own inode (free from getdents64/d_ino)
 }
 
 // DirErr is one error encountered while producing a WalkResult.
@@ -69,8 +68,7 @@ func (e Entry) Name() string { return e.name.string() }
 func (e Entry) Ino() uint64 { return e.ino }
 
 // IsDir reports whether the entry is a directory, per d_type. It does NOT
-// fall back to a stat call for DT_UNKNOWN, callers that need certainty
-// should stat explicitly
+// fall back to a stat call for DT_UNKNOWN, callers that need certainty should stat explicitly
 func (e Entry) IsDir() bool { return e.typ == dtDir }
 
 func (e Entry) Type() fs.FileMode { return e.FileMode() }
@@ -135,6 +133,7 @@ func DefaultPoolConfig() PoolConfig {
 		PoolSize:         runtime.GOMAXPROCS(0),
 		InitialWorkerCap: 32,
 		ResultBuffSize:   128, // TODO: is this enough? i dont want this to block. ever.
+		// TODO: see what config do the bench scripts use
 	}
 }
 
@@ -204,9 +203,9 @@ func NewWalkmanWithConfig(
 	// is the only thing that differs between plain and symlink-following
 	// walks. same item type, same pool, no per-entry branch.
 	execute := w.visit
-	if followLinks {
-		execute = w.visitSym
-	}
+	// if followLinks {
+	// 	execute = w.visitSym
+	// }
 
 	w.pool = wsp.NewWorkerPool(
 		context.Background(),
@@ -219,98 +218,8 @@ func NewWalkmanWithConfig(
 	return w
 }
 
-// readDir opens name and reads every entry in it, unsorted. Deliberately
-// using the File.ReadDir(-1) form rather than the package-level os.ReadDir,
-// which sorts by filename. That sort is wasted work here since results
-// are consumed by directory, not in a global sorted order anyway.
-// func readDir(name string) ([]fs.DirEntry, error) {
-// 	f, err := os.Open(name)
-// 	if err != nil {
-// 		return nil, err
-// 	}
-// 	defer f.Close()
-// 	return f.ReadDir(-1)
-// }
 
-// filterSkipped removes, in place and without preserving order, every
-// entry whose Name() is in skip. It is an in-place swap-delete.
-func filterSkipped(dirs []fs.DirEntry, skip map[string]struct{}) []fs.DirEntry {
-	n := len(dirs)
-	for i := 0; i < n; {
-		if _, present := skip[dirs[i].Name()]; present {
-			n--
-			dirs[i] = dirs[n]
-			continue // re-check index i against the newly swapped-in entry
-		}
-		i++
-	}
-	return dirs[:n]
-}
-
-// newPath stores a path in this worker's storage and returns a string slice referencing it.
-func (w *Walkman) newPath(workerID int, parent, child string) string {
-	pathStore := &w.workers[workerID].paths
-	return pathStore.retrieve(pathStore.storePath(parent, child))
-}
-
-// visit is the Task run for every directory the walk encounters. It is
-// called concurrently, from any worker in the pool for different items,
-// so it must not touch anything on Walkman that isn't safe for that
-// (conf is read-only after construction).
 func (w *Walkman) visit(
-	_ context.Context,
-	workerID int,
-	item walkItem,
-	res chan<- DirBatch,
-	spawn func(...walkItem),
-) error {
-	path := item.path.string()
-	dirs, err := readDir(path)
-	if err != nil {
-		// A permission-denied (or similar) directory is a fact about that
-		// one item, not a reason to kill every other worker in the pool.
-		// Entries stays nil: the directory itself couldn't be read at all, so
-		// there's nothing else this result can carry.
-		res <- DirBatch{Dir: path, Errs: []DirErr{{Name: path, Err: err}}}
-		return nil
-	}
-
-	before := len(dirs)
-	if len(w.conf.skipSet) != 0 && before != 0 {
-		dirs = filterSkipped(dirs, w.conf.skipSet)
-	}
-
-	// Send to channel. We don't care if it's dirs, files or symlinks;
-	// this task doesn't follow symlinks.
-	res <- DirBatch{Dir: path, Entries: dirs}
-
-	// We have reached max depth, don't spawn child dirs, stop here.
-	if w.conf.maxDepth != 0 && item.depth+1 > w.conf.maxDepth {
-		return nil
-	}
-
-	// Spawn child directories.
-	spawnBuf := w.workers[workerID].spawnBuf[:0]
-
-	for i := range dirs {
-		if dirs[i].Type().IsDir() {
-			spawnBuf = append(spawnBuf, walkItem{
-				depth: item.depth + 1,
-				leaf: &pathNode{
-					path:   w.newPath(workerID, path, dirs[i].Name()),
-					parent: item.leaf,
-				},
-			})
-		}
-	}
-	if len(spawnBuf) != 0 {
-		spawn(spawnBuf...)
-	}
-
-	return nil
-}
-
-func (w *Walkman) visit2(
 	_ context.Context,
 	workerID int,
 	item walkItem,
@@ -322,19 +231,17 @@ func (w *Walkman) visit2(
 	mark := worker.results.getEntryMark()
 	err := readDirRaw(path, worker.buf[:0], nil, w.conf.skipSet,
 		func(name []byte, dType uint8, ino uint64) error {
-			off, l := worker.paths.storeByte(name)
 			worker.results.storeEntry(
 				Entry{
 					parentDir: item.path,
-					name:      stringID{store: &worker.paths, PathLen: l, PathOff: off},
+					name:      worker.paths.storeByte(name),
 					ino:       ino,
 					typ:       dType,
 				})
 			return nil
 		})
 	if err != nil {
-		// Same contract as visit: the directory itself couldn't be read.
-		// One DirErr, not a pool-wide abort.
+		// the directory itself couldn't be read. One DirErr, not a pool-wide abort.
 		res <- DirBatch{dir: item.path, Errs: []DirErr{{name: item.path, err: err}}}
 		return nil
 	}
@@ -342,7 +249,27 @@ func (w *Walkman) visit2(
 	entries := worker.results.sliceEntry(mark)
 	res <- DirBatch{dir: item.path, Entries: entries}
 
+	if w.conf.maxDepth != 0 && item.depth+1 > w.conf.maxDepth {
+		return nil
+	}
 
+	spawnBuf := worker.spawnBuf[:0]
+
+	for i := range entries {
+		if entries[i].Type().Type().IsDir() {
+			// allocate the full path to the subdir and store the stringID
+			spawnBuf = append(spawnBuf, walkItem{
+				path:  worker.paths.joinAndStorePath(item.path, entries[i].name),
+				depth: item.depth + 1,
+			})
+		}
+	}
+
+	if len(spawnBuf) != 0 {
+		spawn(spawnBuf...)
+	}
+
+	return nil
 }
 
 // visitSym is visit's counterpart for followLinks: same item type, same
@@ -351,107 +278,107 @@ func (w *Walkman) visit2(
 // guarding against cycles via item.leaf.parent, the chain
 // of directories from root down to here,
 // regardless of whether each hop was a plain directory or a followed symlink.
-func (w *Walkman) visitSym(
-	_ context.Context,
-	workerID int,
-	item walkItem,
-	res chan<- DirBatch,
-	spawn func(...walkItem),
-) error {
-	path := item.leaf.path
-	dirs, err := readDir(path)
-	if err != nil {
-		res <- DirBatch{Dir: path, Errs: []DirErr{{Name: path, Err: err}}}
-		return nil
-	}
-
-	before := len(dirs)
-	if len(w.conf.skipSet) != 0 && before != 0 {
-		dirs = filterSkipped(dirs, w.conf.skipSet)
-	}
-
-	result := DirBatch{Dir: path}
-
-	worker := &w.workers[workerID]
-	ancestorsResolved := false
-
-	hasCycle := func(k dirKey) bool {
-		if !ancestorsResolved {
-			ancestorsResolved = true
-			worker.dirBuf = worker.dirBuf[:0]
-			for n := item.leaf; n != nil; n = n.parent {
-				nk, err := statKey(n.path)
-				if err != nil {
-					continue
-				}
-				worker.dirBuf = append(worker.dirBuf, nk)
-			}
-		}
-		return slices.Contains(worker.dirBuf, k)
-	}
-
-	swapDel := func(i int) []fs.DirEntry {
-		n := len(dirs)
-		dirs[i] = dirs[n-1]
-		return dirs[:n-1]
-	}
-
-	atMaxDepth := w.conf.maxDepth != 0 && item.depth+1 > w.conf.maxDepth
-	spawnBuf := worker.spawnBuf[:0]
-
-	for i := 0; i < len(dirs); {
-		entry := dirs[i]
-		childPath := w.newPath(workerID, path, entry.Name())
-
-		mode := entry.Type()
-		isDir := mode.IsDir()
-		isSymlink := mode&fs.ModeSymlink != 0
-
-		if isSymlink {
-			info, err := os.Stat(childPath)
-			if err != nil {
-				result.Errs = append(result.Errs, DirErr{Name: entry.Name(), Err: ErrDanglingSymlink})
-				dirs = swapDel(i)
-				continue
-			}
-			if !info.IsDir() {
-				dirs[i] = fs.FileInfoToDirEntry(info)
-				i++
-				continue
-			}
-			st, ok := info.Sys().(*syscall.Stat_t)
-			if !ok {
-				i++
-				continue
-			}
-			k := dirKey{dev: uint64(st.Dev), ino: st.Ino}
-			if hasCycle(k) {
-				result.Errs = append(result.Errs, DirErr{Name: entry.Name(), Err: ErrSymlinkCycle})
-				dirs = swapDel(i)
-				continue
-			}
-			dirs[i] = fs.FileInfoToDirEntry(info)
-			isDir = true
-		}
-
-		if isDir && !atMaxDepth {
-			spawnBuf = append(spawnBuf, walkItem{
-				depth: item.depth + 1,
-				leaf:  &pathNode{path: childPath, parent: item.leaf},
-			})
-		}
-		i++
-	}
-
-	result.Entries = dirs
-	res <- result
-
-	if len(spawnBuf) != 0 {
-		spawn(spawnBuf...)
-	}
-
-	return nil
-}
+// func (w *Walkman) visitSym(
+// 	_ context.Context,
+// 	workerID int,
+// 	item walkItem,
+// 	res chan<- DirBatch,
+// 	spawn func(...walkItem),
+// ) error {
+// 	path := item.leaf.path
+// 	dirs, err := readDir(path)
+// 	if err != nil {
+// 		res <- DirBatch{Dir: path, Errs: []DirErr{{Name: path, Err: err}}}
+// 		return nil
+// 	}
+//
+// 	before := len(dirs)
+// 	if len(w.conf.skipSet) != 0 && before != 0 {
+// 		dirs = filterSkipped(dirs, w.conf.skipSet)
+// 	}
+//
+// 	result := DirBatch{Dir: path}
+//
+// 	worker := &w.workers[workerID]
+// 	ancestorsResolved := false
+//
+// 	hasCycle := func(k dirKey) bool {
+// 		if !ancestorsResolved {
+// 			ancestorsResolved = true
+// 			worker.dirBuf = worker.dirBuf[:0]
+// 			for n := item.leaf; n != nil; n = n.parent {
+// 				nk, err := statKey(n.path)
+// 				if err != nil {
+// 					continue
+// 				}
+// 				worker.dirBuf = append(worker.dirBuf, nk)
+// 			}
+// 		}
+// 		return slices.Contains(worker.dirBuf, k)
+// 	}
+//
+// 	swapDel := func(i int) []fs.DirEntry {
+// 		n := len(dirs)
+// 		dirs[i] = dirs[n-1]
+// 		return dirs[:n-1]
+// 	}
+//
+// 	atMaxDepth := w.conf.maxDepth != 0 && item.depth+1 > w.conf.maxDepth
+// 	spawnBuf := worker.spawnBuf[:0]
+//
+// 	for i := 0; i < len(dirs); {
+// 		entry := dirs[i]
+// 		childPath := w.newPath(workerID, path, entry.Name())
+//
+// 		mode := entry.Type()
+// 		isDir := mode.IsDir()
+// 		isSymlink := mode&fs.ModeSymlink != 0
+//
+// 		if isSymlink {
+// 			info, err := os.Stat(childPath)
+// 			if err != nil {
+// 				result.Errs = append(result.Errs, DirErr{Name: entry.Name(), Err: ErrDanglingSymlink})
+// 				dirs = swapDel(i)
+// 				continue
+// 			}
+// 			if !info.IsDir() {
+// 				dirs[i] = fs.FileInfoToDirEntry(info)
+// 				i++
+// 				continue
+// 			}
+// 			st, ok := info.Sys().(*syscall.Stat_t)
+// 			if !ok {
+// 				i++
+// 				continue
+// 			}
+// 			k := dirKey{dev: uint64(st.Dev), ino: st.Ino}
+// 			if hasCycle(k) {
+// 				result.Errs = append(result.Errs, DirErr{Name: entry.Name(), Err: ErrSymlinkCycle})
+// 				dirs = swapDel(i)
+// 				continue
+// 			}
+// 			dirs[i] = fs.FileInfoToDirEntry(info)
+// 			isDir = true
+// 		}
+//
+// 		if isDir && !atMaxDepth {
+// 			spawnBuf = append(spawnBuf, walkItem{
+// 				depth: item.depth + 1,
+// 				leaf:  &pathNode{path: childPath, parent: item.leaf},
+// 			})
+// 		}
+// 		i++
+// 	}
+//
+// 	result.Entries = dirs
+// 	res <- result
+//
+// 	if len(spawnBuf) != 0 {
+// 		spawn(spawnBuf...)
+// 	}
+//
+// 	return nil
+// }
 
 // Walk starts walking root and returns a channel of per-directory results.
 // The channel closes once every worker has finished (no work left, or a
@@ -463,8 +390,11 @@ func (w *Walkman) Walk(root string) <-chan DirBatch {
 	// without re-running filepath.Clean per entry.
 	root = filepath.Clean(root)
 
-	// parent is nil for the first walkItem
-	w.pool.Submit(walkItem{depth: 1, leaf: &pathNode{path: root}})
+	// TODO: no followlinks handling for now
+	w.pool.Submit(walkItem{
+		path: w.workers[0].paths.storeString(root),
+		depth: 1,
+	})
 	return w.pool.Run()
 }
 

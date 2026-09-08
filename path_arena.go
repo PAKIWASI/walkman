@@ -21,17 +21,18 @@ type pathArena struct {
 // worker's pathArena the string belongs to
 type stringID struct {
 	store   *pathArena
-	PathLen uint32 // length of the path
-	PathOff uint32 // offset into that worker's path arena
+	len uint32 // length of the path
+	off uint32 // offset into that worker's path arena
 }
 
 func (id stringID) string() string {
-	return id.store.retrieve(id.PathOff, id.PathLen)
+	return id.store.retrieve(id.off, id.len)
 }
 
 func byteToString(buf []byte) string {
 	return unsafe.String(unsafe.SliceData(buf), len(buf))
 }
+
 
 // newStringArena initializes and returns a new stringStore.
 // cap controls the initial capacity of the underlying buffer;
@@ -51,7 +52,7 @@ func (pa *pathArena) retrieve(off, len uint32) string {
 
 // store stores the input string in its own storage and returns a stringID
 // that can be used to retrieve the string.
-func (pa *pathArena) store(name string) (uint32, uint32) {
+func (pa *pathArena) storeString(name string) stringID {
 	s := len(name)
 	c := cap(pa.buf)
 	retOff := uint32(pa.off)
@@ -67,11 +68,15 @@ func (pa *pathArena) store(name string) (uint32, uint32) {
 		pa.off += s
 	}
 
-	return retOff, uint32(s)
+	return stringID{
+		store: pa,
+		off: retOff,
+		len: uint32(s),
+	}
 }
 
 // TODO: methods can have generics in gov1.27, idk wht's wrong
-func (pa *pathArena) storeByte(name []byte) (uint32, uint32) {
+func (pa *pathArena) storeByte(name []byte) stringID {
 	s := len(name)
 	c := cap(pa.buf)
 	retOff := uint32(pa.off)
@@ -86,21 +91,25 @@ func (pa *pathArena) storeByte(name []byte) (uint32, uint32) {
 		pa.off += s
 	}
 
-	return retOff, uint32(s)
+	return stringID{
+		store: 	pa,
+		off: retOff,
+		len: uint32(s),
+	}
 }
 
 
 
-// storePath normalizes and joins parent and child strings with the OS path separator
+// joinAndStorePath normalizes and joins parent and child strings with the OS path separator
 // and returns the resulting stringID.
-func (pa *pathArena) storePath(parent, child string) (uint32, uint32) {
-	plen := len(parent)
-	clen := len(child)
+func (pa *pathArena) joinAndStorePath(parent, child stringID) stringID {
+	pstr := parent.string()
+	plen := int(parent.len)
 	sep := 0
-	if parent[plen-1] != os.PathSeparator {
+	if pstr[plen-1] != os.PathSeparator {
 		sep++
 	}
-	total := plen + sep + clen
+	total := plen + sep + int(child.len)
 
 	c := cap(pa.buf)
 	if pa.off+total > len(pa.buf) {
@@ -112,12 +121,16 @@ func (pa *pathArena) storePath(parent, child string) (uint32, uint32) {
 
 	retOff := uint32(pa.off)
 
-	copy(pa.buf[pa.off:pa.off+plen], parent)
+	copy(pa.buf[pa.off:pa.off+plen], pstr)
 	if sep == 1 {
 		pa.buf[pa.off+plen] = os.PathSeparator
 	}
-	copy(pa.buf[pa.off+plen+sep:pa.off+total], child)
+	copy(pa.buf[pa.off+plen+sep:pa.off+total], child.string())
 	pa.off += total
 
-	return retOff, uint32(total)
+	return stringID{
+		store: pa,
+		off: retOff,
+		len: uint32(total),
+	}
 }
