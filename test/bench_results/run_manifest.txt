@@ -1,0 +1,12 @@
+run_all.sh — 2026-09-08 18:27:50 UTC
+host: Linux 7.2.2-artix1-1.1 x86_64 GNU/Linux
+cpu:  11th Gen Intel(R) Core(TM) i5-1135G7 @ 2.40GHz
+walkman:          /home/wasi/Documents/projects/go/walkman/build/walkman
+ignore-parallel:  /home/wasi/Documents/projects/go/walkman/build/ignore-parallel-cli
+tree:             /home/wasi/Documents/projects/foss/linux-7.2.2
+tree dirs=6203 files=94757 symlinks=99
+workers:  1,2,4,8
+runs:     10   warmup: 5
+
+hyperfine.csv -> bench_results/hyperfine.csv (9 lines)
+perf.csv -> bench_results/perf.csv (81 lines)
