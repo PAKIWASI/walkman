@@ -22,17 +22,17 @@ func newResultArena(entriesCap, dirErrCap int) resultArena {
 	}
 
 	return resultArena{
-		entries: make([]Entry, entriesCap),
-		dirErrs: make([]DirErr, dirErrCap),
+		entries: make([]Entry, 0, entriesCap),
+		dirErrs: make([]DirErr, 0, dirErrCap),
 	}
 }
 
 func (ra *resultArena) getEntryMark() (off int) {
-	return len(ra.entries) - 1
+	return len(ra.entries)
 }
 
 func (ra *resultArena) getDirErrMark() (off int) {
-	return len(ra.dirErrs) - 1
+	return len(ra.dirErrs)
 }
 
 // func (pa *pathArena) store[T string | []byte](name T) (uint32, uint32) {
@@ -58,9 +58,9 @@ func (ra *resultArena) storeDirErr(derr DirErr) {
 
 // return a slice entries[off:len(entry)-1]
 func (ra *resultArena) sliceEntry(off int) []Entry {
-	return ra.entries[off : len(ra.entries)-1]
+	return ra.entries[off : len(ra.entries)]
 }
 
 func (ra *resultArena) sliceDirErr(off int) []DirErr {
-	return ra.dirErrs[off : len(ra.dirErrs)-1]
+	return ra.dirErrs[off : len(ra.dirErrs)]
 }

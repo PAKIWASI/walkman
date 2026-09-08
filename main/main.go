@@ -84,7 +84,7 @@ func main() {
 				}
 
 				if *print {
-					fmt.Printf("%s  %s/%s\n", kind, r.Dir, e.Name())
+					fmt.Printf("%s  %s/%s\n", kind, r.Dir(), e.Name())
 				}
 			}
 		}

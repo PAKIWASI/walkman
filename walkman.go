@@ -131,8 +131,8 @@ type PoolConfig struct {
 func DefaultPoolConfig() PoolConfig {
 	return PoolConfig{
 		PoolSize:         runtime.GOMAXPROCS(0),
-		InitialWorkerCap: 32,
-		ResultBuffSize:   128, // TODO: is this enough? i dont want this to block. ever.
+		InitialWorkerCap: 64,
+		ResultBuffSize:   256, // TODO: is this enough? i dont want this to block. ever.
 		// TODO: see what config do the bench scripts use
 	}
 }
@@ -229,7 +229,7 @@ func (w *Walkman) visit(
 	path := item.path.string()
 	worker := &w.workers[workerID]
 	mark := worker.results.getEntryMark()
-	err := readDirRaw(path, worker.buf[:0], nil, w.conf.skipSet,
+	err := readDirRaw(path, worker.buf[:], nil, w.conf.skipSet,
 		func(name []byte, dType uint8, ino uint64) error {
 			worker.results.storeEntry(
 				Entry{

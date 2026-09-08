@@ -6,7 +6,7 @@ import (
 )
 
 const (
-	getdentsBufSize  = 32 * 1024 // 32 KB per worker
+	getdentsBufSize  = 64 * 1024 // 32 KB per worker
 	sysGetdents64    = syscall.SYS_GETDENTS64
 	direntNameOffset = 19 // uint64(8) + int64(8) + uint16(2) + uint8(1) = 19, no padding on this ABI
 
@@ -78,6 +78,8 @@ func readDirRaw(
 				break
 			}
 
+			pos += reclen // increment to the next record unconditionally
+
 			// find the position of the name string within the record
 			// it should be at offset 19 (no padding)
 			namePtr := unsafe.Add(unsafe.Pointer(dent), direntNameOffset)
@@ -105,7 +107,6 @@ func readDirRaw(
 				return err
 			}
 
-			pos += reclen // increment to the next record
 		}
 	}
 	return nil
