@@ -29,8 +29,6 @@ type walkItem struct {
 	ancestor ancestorRef // zero value when followLinks is off
 	// when followLinks is on: locates the ancestorEntry,
 	// which has the ino, dev(from readDirRaw) pair and a link to it's parent
-	// TODO: why does the walkItem carry the ino number??
-	// ino      uint64      // this directory's own inode (free from getdents64/d_ino)
 }
 
 // DirErr is one error encountered while producing a WalkResult.
