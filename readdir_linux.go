@@ -26,6 +26,14 @@ type linuxDirent64 struct {
 	// (we get a variable length c array and Name slice will point to it)
 }
 
+// byteToString is a zero-copy view of buf as a string, used only for the
+// transient skip-set lookup below. It doesn't outlive buf, and must never
+// be retained; anything that needs to persist goes through the string
+// store instead, which makes its own copy.
+func byteToString(buf []byte) string {
+	return unsafe.String(unsafe.SliceData(buf), len(buf))
+}
+
 // readDirRaw reads directory entries directly via SYS_GETDENTS64 into worker's scratch buffer.
 func readDirRaw(
 	dirPath string, // the directory to read

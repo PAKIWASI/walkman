@@ -35,9 +35,6 @@ func (ra *resultArena) getDirErrMark() (off int) {
 	return len(ra.dirErrs)
 }
 
-// func (pa *pathArena) store[T string | []byte](name T) (uint32, uint32) {
-// }
-
 func (ra *resultArena) storeEntry(e Entry) {
 	l := len(ra.entries)
 	if l >= cap(ra.entries) {
