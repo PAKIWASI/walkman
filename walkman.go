@@ -33,7 +33,9 @@ type walkItem struct {
 	depth uint32 // depth of this entry
 	// ancestor is the link in the walk's shared ancestor chain describing
 	// this item's own directory (ino/dev of the directory, plus its own
-	// parent link). nil when followLinks is off
+	// parent link). nil when followLinks is off, or for the root when the
+	// root couldn't be stat'ed. It is what a symlink found in this directory
+	// gets compared against, so work stealing can't break cycle detection.
 	ancestor *ancestorEntry
 }
 
@@ -79,7 +81,7 @@ func (e Entry) FileMode() fs.FileMode {
 	}
 }
 
-// Info gives lazy Lstat on entry
+// Info gives you lazy Lstat on any entry
 func (e Entry) Info() (fs.FileInfo, error) {
 	return os.Lstat(filepath.Join(e.parentDir, e.name))
 }
@@ -139,6 +141,8 @@ type workerState struct {
 	// scratch buffer for accumulating one directory's entries before
 	// they're flushed into results.entries
 	entryScratch []Entry
+	// per-worker, single-writer arena for every path/name string this worker produces
+	paths *stores.StringStore
 }
 
 type Walkman struct {
@@ -146,10 +150,6 @@ type Walkman struct {
 	pool *wsp.WorkerPool[walkItem, DirBatch]
 	// per-worker state keyed by workerID
 	workers []workerState
-	// append-only storage for every directory path computed during the
-	// walk, shared across all workers. Lock-free/CAS-based (stores.StringStore),
-	// since every worker now writes into the same instance.
-	paths *stores.StringStore
 	// shared ancestor-chain storage for symlink-cycle detection, one
 	// instance for the whole pool. nil when followLinks is off.
 	ancestors *stores.GenericStore[ancestorEntry]
@@ -183,7 +183,6 @@ func NewWalkmanWithConfig(
 		},
 	}
 
-	w.paths = stores.NewStringStore()
 	if w.conf.followLinks {
 		w.ancestors = newAncestorStore()
 	}
@@ -193,6 +192,7 @@ func NewWalkmanWithConfig(
 		w.workers[i].results = newResultArena(0)
 		w.workers[i].spawnBuf = make([]walkItem, 8)
 		w.workers[i].entryScratch = make([]Entry, 0, entryNodeSize)
+		w.workers[i].paths = stores.NewStringStore()
 	}
 
 	// The pool is bound to one Task at construction. Which one we hand it
@@ -230,7 +230,7 @@ func (w *Walkman) readEntries(worker *workerState, item walkItem) (entries []Ent
 		func(name []byte, dType uint8, ino uint64) error {
 			scratch = append(scratch, Entry{
 				parentDir: item.path,
-				name:      w.paths.StoreBytes(name),
+				name:      worker.paths.StoreBytes(name),
 				ino:       ino,
 				typ:       dType,
 			})
@@ -271,10 +271,10 @@ func (w *Walkman) visit(
 	spawnBuf := worker.spawnBuf[:0]
 
 	for i := range entries {
-		if entries[i].IsDir() {
+		if entries[i].Type().Type().IsDir() {
 			// allocate the full path to the subdir and store it in the arena
 			spawnBuf = append(spawnBuf, walkItem{
-				path:  w.paths.StorePathZ(item.path, entries[i].name),
+				path:  worker.paths.StorePathZ(item.path, entries[i].name),
 				depth: item.depth + 1,
 			})
 		}
@@ -339,7 +339,7 @@ func (w *Walkman) visitSym(
 		if sawLink && e.typ == dtLnk {
 			// The link's own path: what gets reported and, when the target
 			// is a directory, what gets walked
-			childPath := w.paths.StorePathZ(item.path, e.name)
+			childPath := worker.paths.StorePathZ(item.path, e.name)
 
 			info, statErr := os.Stat(childPath)
 			if statErr != nil {
@@ -381,7 +381,6 @@ func (w *Walkman) visitSym(
 				spawnBuf = append(spawnBuf, walkItem{
 					path:     childPath,
 					depth:    item.depth + 1,
-					// dev:      uint64(st.Dev),
 					ancestor: w.pushAncestor(workerID, st.Ino, uint64(st.Dev), item.ancestor),
 				})
 			}
@@ -392,9 +391,12 @@ func (w *Walkman) visitSym(
 
 		if e.typ == dtDir && !atMaxDepth {
 			spawnBuf = append(spawnBuf, walkItem{
-				path:     w.paths.StorePathZ(item.path, e.name),
-				depth:    item.depth + 1,
-				// dev:      item.dev,
+				path:  worker.paths.StorePathZ(item.path, e.name),
+				depth: item.depth + 1,
+				// dev is not available from getdents64 for a plain (non-symlink)
+				// subdirectory, so it's inherited from the current directory's
+				// own ancestor entry rather than carried in walkItem or Entry.
+				// See ancestors.go / pushAncestor discussion.
 				ancestor: w.pushAncestor(workerID, e.ino, item.ancestor.dev, item.ancestor),
 			})
 		}
@@ -451,7 +453,7 @@ func (w *Walkman) Walk(root string) <-chan DirBatch {
 	root = filepath.Clean(root)
 
 	item := walkItem{
-		path:  w.paths.StoreStringZ(root),
+		path:  stores.NewStringZ(root),
 		depth: 1,
 	}
 
