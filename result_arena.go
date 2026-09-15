@@ -36,20 +36,16 @@ func (ra *resultArena) getDirErrMark() (off int) {
 }
 
 func (ra *resultArena) storeEntry(e Entry) {
-	l := len(ra.entries)
-	if l >= cap(ra.entries) {
-		slices.Grow(ra.entries, 2*l)
+	if len(ra.entries) >= cap(ra.entries) {
+		ra.entries = slices.Grow(ra.entries, len(ra.entries))
 	}
-
 	ra.entries = append(ra.entries, e)
 }
 
 func (ra *resultArena) storeDirErr(derr DirErr) {
-	l := len(ra.entries)
-	if l >= cap(ra.entries) {
-		slices.Grow(ra.entries, 2*l)
+	if len(ra.dirErrs) >= cap(ra.dirErrs) {
+		ra.dirErrs = slices.Grow(ra.dirErrs, len(ra.dirErrs))
 	}
-
 	ra.dirErrs = append(ra.dirErrs, derr)
 }
 
