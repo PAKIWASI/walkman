@@ -25,11 +25,12 @@
 
 ## Features
 
-- Concurrent traversal via a work-stealing pool, worker count configurable (defaults to `GOMAXPROCS`)
-- Streaming results through a channel, one `WalkResult` per directory — pull-based like an iterator, not a callback
+- Concurrent traversal via a work-stealing pool, worker count configurable (defaults to `runtime.GOMAXPROCS(0)`, i.e. logical/SMT threads)
+- Streaming results through a channel, one `DirBatch` per directory — pull-based like an iterator, not a callback
 - Per-directory error reporting that doesn't abort unrelated work
 - Skip entries by name (prunes matching directories), optional max depth, optional symlink following
-- Benchmark suite vs Rust's parallel `ignore::WalkParallel` and [fastwalk](https://github.com/charlievieth/fastwalk), on the linux kernel source tree
+- `Entry` implements `fs.DirEntry` (zero-allocation equivalent), with inode numbers from `getdents64`
+- Benchmark suite vs Rust's parallel `ignore::WalkParallel`, [fastwalk](https://github.com/charlievieth/fastwalk), and the `zlob` crate, on the linux kernel source tree
 
 ## Installation
 
@@ -71,7 +72,7 @@ func main() {
 }
 ```
 
-> **Drain before you wait.** `Walk`'s channel stays open until all queued work completes, consume it fully then call `Wait()` for the terminal pool error. Per-entry errors live inside `WalkResult.Errs` and don't abort the rest of the traversal. A directory can list successfully (`Entries` populated) while individual entries inside it (a dangling symlink, a detected cycle) still show up as their own `DirErr`.
+> **Drain before you wait.** `Walk`'s channel stays open until all queued work completes, consume it fully then call `Wait()` for the terminal pool error. Each directory produces one `DirBatch`; per-entry errors live inside `DirBatch.Errs` and don't abort the rest of the traversal. A directory can list successfully (`Entries` populated) while individual entries inside it (a dangling symlink, a detected cycle) still show up as their own `DirErr`.
 
 ## API
 
@@ -81,7 +82,7 @@ func main() {
 func NewWalkman(followLinks bool, maxDepth uint32, skipList []string) *Walkman
 ```
 
-Defaults: `PoolSize = GOMAXPROCS`, `InitialWorkerCap = 32`, `ResultBuffSize = 128`.
+Defaults: `PoolSize = runtime.GOMAXPROCS(0)` (logical/SMT threads), `InitialWorkerCap = 64`, `ResultBuffSize = 256`.
 
 ### `NewWalkmanWithConfig`
 
@@ -95,24 +96,54 @@ type PoolConfig struct {
 }
 ```
 
+`DefaultPoolConfig` sizes `PoolSize` to `runtime.GOMAXPROCS(0)` (logical/SMT threads); walkman's workload is syscall- and allocation-heavy, not CPU-bound, and the bench harness showed wall time regressing once workers outnumbered the machine's physical cores — callers who've measured a better number can still set `PoolSize` explicitly.
+
 ### `Walk`
 
 ```go
-func (w *Walkman) Walk(root string) <-chan WalkResult
+func (w *Walkman) Walk(root string) <-chan DirBatch
 
-type WalkResult struct {
-    Dir     string
-    Entries []fs.DirEntry // this directory's direct entries
-    Errs    []DirErr      // zero or more per-entry problems from this directory
+type DirBatch struct {
+    Dir     string   // this directory's full path
+    Entries []Entry  // flat slice of this directory's direct entries
+    Errs    []DirErr // zero or more per-entry problems from this directory
 }
 
 type DirErr struct {
     Name string // the entry that caused the error
     Err  error
 }
+
+type Entry struct {
+    // Path strings inside Entry are arena-backed and stable for the
+    // lifetime of the DirBatch they came from.
+}
+
+func (e Entry) Name() string
+func (e Entry) IsDir() bool            // per d_type; no stat fallback for DT_UNKNOWN
+func (e Entry) Type() fs.FileMode      // maps d_type -> ModeDir / ModeSymlink / 0 / ModeIrregular
+func (e Entry) FileMode() fs.FileMode  // same as Type
+func (e Entry) Info() (fs.FileInfo, error) // calls os.Lstat on demand
+func (e Entry) Ino() uint64            // inode number from getdents64
 ```
 
+`Entry` implements `fs.DirEntry`, so it drops into any API that wants one.
+
 Child directories are scheduled as separate tasks, not included in `Entries`. `Entries` and `Errs` aren't mutually exclusive: a directory can list successfully while individual entries inside it (a dangling symlink, a detected cycle) are reported as their own `DirErr` alongside the otherwise-complete `Entries`. `Entries` is nil only when the directory itself couldn't be opened at all, in which case `Errs` holds exactly that one failure.
+
+A `DirBatch` is built once by one worker from one `readdir`/`getdents64` call, never re-queued and never stolen. Its `Entries`/`Errs` slices point into that worker's append-only arena, which is never reused, so a batch a consumer is still holding is never overwritten by the next directory that worker handles — the slices stay valid, and unchanged, for as long as the consumer keeps them.
+
+### Sentinel errors
+
+```go
+var (
+    ErrSymlinkCycle    = errors.New("walkman: symlink cycle")
+    ErrDanglingSymlink = errors.New("walkman: dangling/unresolved symlink")
+    ErrNoDevInoInfo    = errors.New("walkman: no dev/ino info available")
+)
+```
+
+`ErrSymlinkCycle` and `ErrDanglingSymlink` are reported via `DirBatch.Errs` when symlink following is on. `ErrNoDevInoInfo` is a portability guard surfaced when a directory's `stat` can't produce dev/ino (e.g. a platform where `getdents64`'s `d_type` isn't reliable and `Stat` can't fill dev/ino for the ancestor chain) — on Linux it is not reachable.
 
 ### `Wait`
 
@@ -129,34 +160,36 @@ Blocks until the pool finishes, returns the first fatal pool-level error.
 | **Ordering** | Completion-ordered, not path-sorted. Layer sorting/BFS on top of the stream if you need it. |
 | **Skip list** | Matches entry names at every depth (e.g. `.git`, `node_modules`), a match prunes the whole subtree. |
 | **Max depth** | `0` = unlimited; otherwise the walker won't descend past that depth. |
-| **Symlinks** | Not followed by default. When enabled, resolves via `os.Stat` and descends if the target is a directory. A detected cycle is reported as a `DirErr` (`walkman.ErrSymlinkCycle`) on the offending entry. Dangling symlinks are reported as `walkman.ErrDanglingSymlink`. |
-| **Errors** | A directory that fails to open reports its error as the sole `DirErr` in its own `WalkResult`, other workers keep going. |
+| **Symlinks** | Not followed by default. When enabled, resolves each symlink via `os.Stat` and descends if the target is a directory. A detected cycle is reported as a `DirErr` (`walkman.ErrSymlinkCycle`) on the offending entry and dropped; a dangling symlink is reported as `walkman.ErrDanglingSymlink` and dropped. The entry keeps the link's own name and path but reports the **target's** type (so a link-to-dir is `IsDir()==true` and walked at the link's own path). Cycle detection compares `(dev, ino)` against a shared ancestor chain, so it survives work stealing. |
+| **Errors** | A directory that fails to open reports its error as the sole `DirErr` in its own `DirBatch`, other workers keep going. |
 
 ## How it works
 
-Each task is intentionally small. The leaf has the full path to the `walkItem` and a pointer to its direct ancestor (used for cycle detection if symlinks are enabled):
+Each task is intentionally small. The leaf carries the full path to the directory, its depth, the device number of the directory it walks, and a pointer into the walk's shared ancestor chain (used for cycle detection when symlinks are enabled):
 
 ```go
 type walkItem struct {
-    depth uint32
-    leaf  *pathNode
+    path    string   // NUL-terminated arena memory (StringStore)
+    depth   uint32
+    dev     uint64   // device of this directory; zero only if the root stat failed
+    ancestor *ancestorEntry // this directory's own link in the shared chain; nil when followLinks is off
 }
 
-type pathNode struct {
-    path   string
-    parent *pathNode
+type ancestorEntry struct {
+    ino, dev uint64
+    parent   *ancestorEntry // nil marks the chain root (the walk's starting directory)
 }
 ```
 
-Path strings are efficiently stored in per-worker heap arena buffers (`stringStore`) to minimize heap allocations during traversal.
+Path strings are efficiently stored in per-worker heap arena buffers (`stores.StringStore`) to minimize heap allocations during traversal; the shared ancestor chain lives in one `stores.GenericStore[ancestorEntry]`, lock-free and safe for concurrent append/read across workers.
 
-For every directory: open it, read entries with `File.ReadDir(-1)`, drop skipped names, classify entries, optionally resolve symlinks, emit a `WalkResult`, and push child directories back onto the pool.
+For every directory: open it, read entries with `getdents64`, drop skipped names, classify entries by `d_type`, optionally resolve `DT_LNK` entries via `os.Stat`, emit a `DirBatch`, and push child directories back onto the pool. Plain and symlink-following walks use the same pool, the same item type, and the same per-directory read path — only the per-entry task function differs (`visit` vs `visitSym`), bound once at construction when `followLinks` is set.
 
 The work-stealing pool itself lives in [`github.com/PAKIWASI/workstealpool`](https://github.com/PAKIWASI/workstealpool).
 
 ## Channels, not callbacks
 
-`walkman` is **channel-based**, no callbacks. `Walk` returns `<-chan WalkResult` immediately, and you consume it with an ordinary `for range`. It behaves like a pull iterator over the tree rather than a push callback:
+`walkman` is **channel-based**, no callbacks. `Walk` returns `<-chan DirBatch` immediately, and you consume it with an ordinary `for range`. It behaves like a pull iterator over the tree rather than a push callback:
 
 ```go
 for result := range w.Walk(root) {
@@ -188,17 +221,53 @@ go build -o build/walkman ./walkman
 --print            print every entry
 --bench N          repeat N times and report timing
 --quiet            suppress the summary line
---workers N        worker-pool size; 0 = GOMAXPROCS
+--workers N        worker-pool size; 0 = runtime.GOMAXPROCS(0)
 ```
 
 ```bash
 cd rust_ignore_parallel && cargo build --release    # produces build/ignore-parallel-cli
+cd rust_zlob_walk         && cargo build --release  # produces build/zlob-walk-cli
 ```
+
+The Rust CLIs are thin wrappers around `ignore::WalkParallel` and `zlob::walk::WalkBuilder` respectively, built to be directly comparable to the Go `walkman` package — same flags, same output format, same unfiltered semantics (gitignore/hidden/ignore-case all explicitly disabled), so they drop straight into the benchmark harness in `test/`.
 
 
 ## Benchmarks
 
-`walkman` vs Rust's parallel `ignore::WalkParallel` (the ripgrep walker) vs `fastwalk`, walking the **Linux kernel source** (`linux-7.2.2`, 6,203 dirs / 94,757 files / 99 symlinks). Tested on my laptop: **Intel i5-1135G7 (4C/8T)**, Artix Linux (kernel 7.1.9), via `hyperfine --min-runs 10 --warmup 5`.
+`walkman` vs Rust's parallel `ignore::WalkParallel` (the ripgrep walker) vs `fastwalk` vs the `zlob` crate's walker, walking the **Linux kernel source** (`linux-7.2.2`, 6,203 dirs / 94,757 files / 99 symlinks). Harness: `test/run_all.sh` (hyperfine + perf counters, 10 runs / 5 warmup, worker sweeps via `--workers`).
+
+### Ryzen 7530U (6C/12T) — 2026-09-15
+
+Host: Linux 7.2.4-arch1-2, AMD Ryzen 5 7530U with Radeon Graphics. Binaries built from the working tree at run time. `DefaultPoolConfig` sizes `PoolSize` to `runtime.GOMAXPROCS(0)`, which is 12 on this box. `zlob-walk` has no follow-links mode and was not included in the follow-links sweep; it was also not re-run in this plain-walk run (see the older Intel tables below for a three-way plain-walk comparison that includes it).
+
+**Mean wall-clock (ms), no symlinks followed — hyperfine:**
+
+| Workers | walkman | ignore-parallel |
+| ---: | ---: | ---: |
+| 1 | **159** | 185 |
+| 2 | 84 | **62** |
+| 4 | 42 | **27** |
+| 8 | 27 | **20** |
+| 10 | 26 | **20** |
+| 12 | **24** | 177 (thrashing — exclude) |
+
+**Mean wall-clock (ms), following symlinks — hyperfine:**
+
+| Workers | walkman | ignore-parallel |
+| ---: | ---: | ---: |
+| 1 | 169 | **106** |
+| 2 | 90 | **55** |
+| 4 | 48 | **30** |
+| 6 | 36 | **23** |
+| 8 | 32 | **22** |
+| 10 | 30 | **20** |
+| 12 | 24 | **20** |
+
+**Follow-links cost (Ryzen, same tree, same binaries):** absolute +2–8 ms wall, ~+7.5% instruction budget at every worker count, `sys_s` flat between modes (no per-directory `fstat` storm — the per-directory dev/ino comes from the open dirfd, not a separate stat). Single-thread follow-links is ~+10 ms over plain; at 12 workers the two are effectively tied. This is the measured cost of the new `visitSym` path; the old naive design (per-entry resolve pass over every entry + per-directory `fstat`) is not what shipped.
+
+### Intel i5-1135G7 (4C/8T) — older run, kept for comparison
+
+Host: Artix Linux (kernel 7.1.9), `hyperfine --min-runs 10 --warmup 5`. Three-way plain-walk and follow-links comparison including `fastwalk` (re-running fastwalk on the Ryzen box was not part of this run).
 
 **Mean wall-clock (ms), no symlinks:**
 
@@ -218,12 +287,12 @@ cd rust_ignore_parallel && cargo build --release    # produces build/ignore-para
 | 4 | 31 | **29** | 38 |
 | 8 | **24** | 29 | 33 |
 
+### Which is faster
 
-### Conclusion
-
-`walkman` *seems* faster on my machine, both on my fs root and on the linux source. BUT I've seen varying results on different machines/cpus, running the same tests, on the same linux source.
-I'm not claiming my tool is "faster than ignore or fastwalk", It is in the ballpark though.
-
+- **Single-threaded, plain walk:** walkman is fastest on both machines (Intel 72ms, Ryzen 159ms â€” both beat ignore-parallel's 101 / 185). walkman ties fastwalk at 81ms on Intel with symlinks at w1.
+- **Multi-threaded:** ignore-parallel generally scales better with worker count. On Ryzen it beats walkman at w2/w4/w8 plain (62/27/20 vs 84/42/27) and across the entire follow-links table. On Intel it edges walkman at w4 plain (26 vs 29) and w8 follows (29 vs 24 â€” walkman wins there) and w4 follows (29 vs 31). Same pattern on both CPUs: walkman's single-thread baseline is better, ignore-parallel's higher-worker scaling is better.
+- **Follow-links overhead is small and bounded.** On Ryzen it's ~+7% instructions and +2â€“8 ms wall, near-zero at high worker counts, and there is no per-directory stat storm. That's measured, not argued; the old per-entry-pass + per-directory-fstat design is not what shipped.
+- **Not claiming definitively faster.** The honest read: walkman's strongest claim is single-thread cost and bounded follow-links overhead; ignore-parallel's is scaling at higher worker counts. Both are in the same ballpark; which one wins depends on worker count, tree shape, CPU, and mode. The fastwalk column is historical only (not re-run on Ryzen).
 ## Testing
 
 ```bash

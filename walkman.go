@@ -128,18 +128,7 @@ type PoolConfig struct {
 	ResultBuffSize   int
 }
 
-// DefaultPoolConfig matches PoolSize to the machine's physical core
-// count rather than GOMAXPROCS (which is logical/SMT-thread count).
-// The workstealpool README's own benchmarks show a CPU-bound
-// divide-and-conquer workload tracking core count and plateauing
-// right at GOMAXPROCS - but walkman's workload is syscall- and
-// allocation-heavy, not CPU-bound, and our own bench_results showed
-// wall time actively regressing past physical core count (CPU
-// migrations jumped ~5x once workers outnumbered physical cores),
-// where the CPU-bound benchmark only plateaus. Callers who want the
-// old GOMAXPROCS-based sizing, or who've measured a better number for
-// their own workload/hardware, can still set PoolSize explicitly via
-// NewWalkmanWithConfig.
+// DefaultPoolConfig sizes PoolSize to runtime.GOMAXPROCS(0)
 func DefaultPoolConfig() PoolConfig {
 	return PoolConfig{
 		PoolSize:         runtime.GOMAXPROCS(0),
