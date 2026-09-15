@@ -30,7 +30,7 @@
 - Per-directory error reporting that doesn't abort unrelated work
 - Skip entries by name (prunes matching directories), optional max depth, optional symlink following
 - `Entry` implements `fs.DirEntry` (zero-allocation equivalent), with inode numbers from `getdents64`
-- Benchmark suite vs Rust's parallel `ignore::WalkParallel`, [fastwalk](https://github.com/charlievieth/fastwalk), and the `zlob` crate, on the linux kernel source tree
+- Benchmark suite vs Rust's parallel `ignore::WalkParallel`, `fastwalk`, and the `zlob` crate, on the linux kernel source tree
 
 ## Installation
 
@@ -238,61 +238,62 @@ The Rust CLIs are thin wrappers around `ignore::WalkParallel` and `zlob::walk::W
 
 ### Ryzen 7530U (6C/12T) — 2026-09-15
 
-Host: Linux 7.2.4-arch1-2, AMD Ryzen 5 7530U with Radeon Graphics. Binaries built from the working tree at run time. `DefaultPoolConfig` sizes `PoolSize` to `runtime.GOMAXPROCS(0)`, which is 12 on this box. `zlob-walk` has no follow-links mode and was not included in the follow-links sweep; it was also not re-run in this plain-walk run (see the older Intel tables below for a three-way plain-walk comparison that includes it).
+Host: Linux 7.2.4-arch1-2, AMD Ryzen 5 7530U with Radeon Graphics. Binaries built from the working tree at run time. `DefaultPoolConfig` sizes `PoolSize` to `runtime.GOMAXPROCS(0)`, which is 12 on this box. This pass re-ran `test/run_all.sh` (20 runs / 5 warmup, workers 1/2/4/8/10/12) and `test/run_all_sym.sh` (10 runs / 5 warmup, workers 1/2/4/6/8/10/12) with all three CLIs built, so `zlob-walk` is included in the plain-walk sweep below; it still has no follow-links mode, so it's absent from the symlinks sweep.
 
-**Mean wall-clock (ms), no symlinks followed — hyperfine:**
+Numbers below are the **median** of the per-run `perf stat` wall-clock samples.
+
+**Median wall-clock (ms), no symlinks followed:**
+
+| Workers | walkman | ignore-parallel | zlob-walk |
+| ---: | ---: | ---: | ---: |
+| 1 | **83** | 96 | 65 |
+| 2 | 40 | 51 | **35** |
+| 4 | 22 | 28 | **19** |
+| 8 | 15 | 20 | **12** |
+| 10 | 13 | 18 | **11** |
+| 12 | 13 | 18 | **10** |
+
+**Median wall-clock (ms), following symlinks:**
 
 | Workers | walkman | ignore-parallel |
 | ---: | ---: | ---: |
-| 1 | **159** | 185 |
-| 2 | 84 | **62** |
-| 4 | 42 | **27** |
-| 8 | 27 | **20** |
-| 10 | 26 | **20** |
-| 12 | **24** | 177 (thrashing — exclude) |
+| 1 | 89 | **98** |
+| 2 | 48 | **56** |
+| 4 | 28 | **30** |
+| 6 | 22 | **23** |
+| 8 | **19** | 22 |
+| 10 | **19** | 20 |
+| 12 | **16** | 35 |
 
-**Mean wall-clock (ms), following symlinks — hyperfine:**
 
-| Workers | walkman | ignore-parallel |
-| ---: | ---: | ---: |
-| 1 | 169 | **106** |
-| 2 | 90 | **55** |
-| 4 | 48 | **30** |
-| 6 | 36 | **23** |
-| 8 | 32 | **22** |
-| 10 | 30 | **20** |
-| 12 | 24 | **20** |
+### Intel i5-1135G7 (4C/8T) — 2026-09-15
 
-**Follow-links cost (Ryzen, same tree, same binaries):** absolute +2–8 ms wall, ~+7.5% instruction budget at every worker count, `sys_s` flat between modes (no per-directory `fstat` storm — the per-directory dev/ino comes from the open dirfd, not a separate stat). Single-thread follow-links is ~+10 ms over plain; at 12 workers the two are effectively tied. This is the measured cost of the new `visitSym` path; the old naive design (per-entry resolve pass over every entry + per-directory `fstat`) is not what shipped.
+Host: Linux 7.2.2-artix1-1.1, 11th Gen Intel(R) Core(TM) i5-1135G7 @ 2.40GHz. `hyperfine --min-runs 10 --warmup 5`, `test/run_all.sh`, worker sweep 1/2/4/8. This pass's binary set was `walkman`, `ignore-parallel`, and `zlob-walk` — `fastwalk` wasn't built for this run, and `zlob-walk` has no follow-links mode, so this pass covers plain-walk only. The follow-links/`fastwalk` table below is carried over from an earlier pass on the same machine and was not re-measured here.
 
-### Intel i5-1135G7 (4C/8T) — older run, kept for comparison
+**Mean wall-clock (ms), no symlinks — hyperfine:**
 
-Host: Artix Linux (kernel 7.1.9), `hyperfine --min-runs 10 --warmup 5`. Three-way plain-walk and follow-links comparison including `fastwalk` (re-running fastwalk on the Ryzen box was not part of this run).
+| Workers | walkman | ignore-parallel | zlob-walk |
+| ---: | ---: | ---: | ---: |
+| 1 | **55** | 95 | 64 |
+| 2 | 28 | 45 | **25** |
+| 4 | 16 | 30 | **14** |
+| 8 | **14** | 31 | 15 |
 
-**Mean wall-clock (ms), no symlinks:**
+**Mean wall-clock (ms), following symlinks, hyperfine (earlier pass, kernel 7.1.9, includes `fastwalk`; not re-measured in the 2026-09-15 run above):**
 
 | Workers | walkman | ignore-parallel | fastwalk |
 | ---: | ---: | ---: | ---: |
-| 1 | **72** | 101 | 76 |
-| 2 | **44** | 54 | 49 |
-| 4 | 29 | **26** | 35 |
-| 8 | **22** | 26 | 26 |
-
-**Mean wall-clock (ms), following symlinks:**
-
-| Workers | walkman | ignore-parallel | fastwalk |
-| ---: | ---: | ---: | ---: |
-| 1 | **81** | 105 | 81 |
+| 1 | 81 | 105 | 81 |
 | 2 | 51 | **50** | 54 |
 | 4 | 31 | **29** | 38 |
 | 8 | **24** | 29 | 33 |
 
 ### Which is faster
 
-- **Single-threaded, plain walk:** walkman is fastest on both machines (Intel 72ms, Ryzen 159ms â€” both beat ignore-parallel's 101 / 185). walkman ties fastwalk at 81ms on Intel with symlinks at w1.
-- **Multi-threaded:** ignore-parallel generally scales better with worker count. On Ryzen it beats walkman at w2/w4/w8 plain (62/27/20 vs 84/42/27) and across the entire follow-links table. On Intel it edges walkman at w4 plain (26 vs 29) and w8 follows (29 vs 24 â€” walkman wins there) and w4 follows (29 vs 31). Same pattern on both CPUs: walkman's single-thread baseline is better, ignore-parallel's higher-worker scaling is better.
-- **Follow-links overhead is small and bounded.** On Ryzen it's ~+7% instructions and +2â€“8 ms wall, near-zero at high worker counts, and there is no per-directory stat storm. That's measured, not argued; the old per-entry-pass + per-directory-fstat design is not what shipped.
-- **Not claiming definitively faster.** The honest read: walkman's strongest claim is single-thread cost and bounded follow-links overhead; ignore-parallel's is scaling at higher worker counts. Both are in the same ballpark; which one wins depends on worker count, tree shape, CPU, and mode. The fastwalk column is historical only (not re-run on Ryzen).
+`walkman` beats the rust (`ignore`) and go (`fastwalk`) implementations, but is slower than the zig (`zlob`) implementation.
+I used up all of my C wizardry (just througing arena/chunked storage at the problem lol) and this is as fast as I can make it, for now.
+
+
 ## Testing
 
 ```bash
@@ -311,6 +312,7 @@ This is a known, benign artifact of `workstealpool`'s unboxed Chase-Lev circular
 
 - Deterministic/sorted and breadth-first output (layered on top of the base walker)
 - `fs.FS`-based traversal
+- `zlob` like globbing (but we don't have simd).
 
 ## LLM Usage
 
