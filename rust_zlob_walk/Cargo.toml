@@ -1,0 +1,10 @@
+[package]
+name = "zlob-walk-cli"
+edition = "2021"
+
+[profile.release]
+opt-level = 3
+lto = true
+
+[dependencies]
+zlob = "1"

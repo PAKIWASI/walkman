@@ -5,6 +5,9 @@ import (
 	"unsafe"
 )
 
+// TODO: make the string store per worker?
+
+
 // StringStore is a lock-free, append-only arena allocator for strings.
 // It packs stored strings into fixed-size byte buffers, avoiding a
 // per-string heap allocation for anything that fits within one node.
@@ -37,6 +40,19 @@ func (ss *StringStore) StoreString(str string) string {
 	return unsafe.String(unsafe.SliceData(back), len(str))
 }
 
+// StoreStringZ behaves exactly like StoreString, except
+// it reserves one extra trailing byte in the arena that
+// is never included in the returned string's length, giving callers a
+// NUL-terminated C-string view they can pass straight to a raw
+// syscall via unsafe.Pointer(unsafe.StringData(s)) with zero extra
+// allocation. Using this for any path that will be opened via a raw openat rather than syscall.Open
+func (ss *StringStore) StoreStringZ(str string) string {
+	back := ss.store.ensureCap(uint64(len(str)) + 1) // +1 reserved NUL terminator
+	copy(back, str)
+	// back[len(str)] is left as zero by the arena's fresh node memory.
+	return unsafe.String(unsafe.SliceData(back), len(str))
+}
+
 // StorePath joins parent and child with an OS path separator (unless
 // parent already ends with one) directly into the arena, returning the
 // joined result as a single stored string.
@@ -59,17 +75,7 @@ func (ss *StringStore) StorePath(parent, child string) string {
 	return unsafe.String(unsafe.SliceData(back), total)
 }
 
-
-// StorePathZ behaves exactly like StorePath, except it reserves one
-// extra trailing byte in the arena that is never included in the
-// returned string's length. Fresh arena node memory starts zeroed, and
-// that reserved byte is never handed out to any other Store call (the
-// node's claim offset moves past it), so it stays zero for the
-// string's whole lifetime, giving callers that need a NUL-terminated
-// C-string view (e.g. passing straight to a raw openat syscall) a
-// pointer they can reuse via unsafe.Pointer(unsafe.StringData(s))
-// with zero extra allocation, instead of paying for
-// syscall.BytePtrFromString's copy on every call.
+// same reasoning as StoreStringZ
 func (ss *StringStore) StorePathZ(parent, child string) string {
 	plen := len(parent)
 	sep := 0
@@ -77,15 +83,15 @@ func (ss *StringStore) StorePathZ(parent, child string) string {
 		sep++
 	}
 	total := plen + sep + len(child)
- 
+
 	back := ss.store.ensureCap(uint64(total) + 1) // +1 reserved NUL terminator
- 
+
 	copy(back[:plen], parent)
 	if sep == 1 {
 		back[plen] = os.PathSeparator
 	}
 	copy(back[plen+sep:total], child)
 	// back[total] is left as zero by the arena's fresh node memory.
- 
+
 	return unsafe.String(unsafe.SliceData(back), total)
 }

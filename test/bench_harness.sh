@@ -55,6 +55,7 @@ set -euo pipefail
 
 WALKMAN_BIN=""
 IGNORE_PARALLEL_BIN=""
+ZLOB_BIN=""
 TREE=""
 WORKERS="1,2,4,$(nproc 2>/dev/null || echo 4)"
 OUT="bench_results.csv"
@@ -69,6 +70,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --walkman) WALKMAN_BIN="$2"; shift 2 ;;
     --ignore-parallel) IGNORE_PARALLEL_BIN="$2"; shift 2 ;;
+    --zlob-walk) ZLOB_BIN="$2"; shift 2 ;;
     --tree)    TREE="$2"; shift 2 ;;
     --workers) WORKERS="$2"; shift 2 ;;
     --out)     OUT="$2"; shift 2 ;;
@@ -115,8 +117,8 @@ if [[ -z "$TREE" ]]; then
   echo "missing required --tree (see --help)" >&2; exit 1
 fi
 
-if [[ -z "$WALKMAN_BIN" && -z "$IGNORE_PARALLEL_BIN" ]]; then
-  echo "missing at least one binary: specify --walkman or --ignore-parallel (see --help)" >&2; exit 1
+if [[ -z "$WALKMAN_BIN" && -z "$IGNORE_PARALLEL_BIN" && -z "$ZLOB_BIN" ]]; then
+  echo "missing at least one binary: specify --walkman, --ignore-parallel, or --zlob-walk (see --help)" >&2; exit 1
 fi
 
 command -v hyperfine >/dev/null || { echo "hyperfine not found: https://github.com/sharkdp/hyperfine#installation" >&2; exit 1; }
@@ -220,7 +222,15 @@ if [[ -n "$IGNORE_PARALLEL_BIN" ]]; then
   done
 fi
 
-
+if [[ -n "$ZLOB_BIN" ]]; then
+  for w in "${WLIST[@]}"; do
+    echo "=== zlob-walk-cli (Rust, zlob::walk::WalkBuilder, workers=$w, follow-links=$FOLLOW_LINKS) ==="
+    CMD="$ZLOB_BIN --quiet --workers $w $FOLLOW_FLAG '$TREE'"
+    hyperfine --warmup "$WARMUP" --min-runs "$MIN_RUNS" "${MAX_RUNS_FLAG[@]}" --export-json "$SCRATCH/hf_zlob_walk.json" "$CMD"
+    IFS=',' read -r cpu_user cpu_sys <<< "$(capture_cpu_time "$CMD")"
+    write_row "zlob-walk" "$w" "$SCRATCH/hf_zlob_walk.json" "$cpu_user" "$cpu_sys" "$FOLLOW_LINKS"
+  done
+fi
 
 echo "results written to $OUT"
 if command -v column >/dev/null 2>&1; then

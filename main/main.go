@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -26,6 +27,13 @@ import (
 )
 
 func main() {
+	// This is a one-shot batch process: it walks and exits (or, under
+	// --bench, walks N times back-to-back in the same process). There's
+	// no long-running steady state that benefits from reclaiming memory
+	// mid-walk, so the usual GC cost doesn't mean much here. Profiling
+	// showed gcBgMarkWorker+gcDrain at ~8% of total samples
+	debug.SetGCPercent(-1)
+
 	maxDepth := flag.Uint("max-depth", 0, "0 = unlimited")
 	followLinks := flag.Bool("follow-links", false, "follow symlinks")
 	skipStr := flag.String("skip", "", "comma-separated names to prune")

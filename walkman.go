@@ -25,6 +25,9 @@ var (
 // Each worker gets one of these, does the work on it, and then spawns
 // more work (if needed) by creating another walkItem.
 type walkItem struct {
+	// path MUST be NUL-terminated arena memory (via StringStore's
+	// StorePathZ or StoreStringZ). readDirRaw opens it via a raw
+	// openat straight against this string's backing bytes
 	path     string
 	depth    uint32         // depth of this entry
 	ancestor *ancestorEntry // nil when followLinks is off, or this is the root
@@ -118,10 +121,18 @@ type PoolConfig struct {
 	ResultBuffSize   int
 }
 
-// DefaultPoolConfig matches PoolSize to GOMAXPROCS. Per the workstealpool
-// README's own benchmarks: speedup on a CPU-bound divide-and-conquer
-// workload tracks physical/logical core count and then plateaus right at
-// GOMAXPROCS, with a slight regression going meaningfully past it (oversubscription).
+// DefaultPoolConfig matches PoolSize to the machine's physical core
+// count rather than GOMAXPROCS (which is logical/SMT-thread count).
+// The workstealpool README's own benchmarks show a CPU-bound
+// divide-and-conquer workload tracking core count and plateauing
+// right at GOMAXPROCS - but walkman's workload is syscall- and
+// allocation-heavy, not CPU-bound, and our own bench_results showed
+// wall time actively regressing past physical core count (CPU
+// migrations jumped ~5x once workers outnumbered physical cores),
+// where the CPU-bound benchmark only plateaus. Callers who want the
+// old GOMAXPROCS-based sizing, or who've measured a better number for
+// their own workload/hardware, can still set PoolSize explicitly via
+// NewWalkmanWithConfig.
 func DefaultPoolConfig() PoolConfig {
 	return PoolConfig{
 		PoolSize:         runtime.GOMAXPROCS(0),
@@ -132,12 +143,19 @@ func DefaultPoolConfig() PoolConfig {
 }
 
 type workerState struct {
-	// raw buf for the getdents64 syscall. Sized to getdentsBufSize (32 KB, matching readdir_linux.go)
+	// raw buf for the getdents64 syscall, sized to getdentsBufSize (readdir_linux.go)
 	buf [getdentsBufSize]byte
 
 	results resultArena
 	// scratch buffer for spawning child items
 	spawnBuf []walkItem
+	// scratch buffer for accumulating one directory's entries before
+	// they're flushed into results.entries in a single storeEntries
+	// call. Reused across directories: reset to [:0] at the start of
+	// each visit, never reallocated below its high-water mark, so its
+	// own growth cost is bounded by the largest single directory this
+	// worker ever sees, not by the total entries over the whole walk.
+	entryScratch []Entry
 }
 
 type Walkman struct {
@@ -145,7 +163,6 @@ type Walkman struct {
 	pool *wsp.WorkerPool[walkItem, DirBatch]
 	// per-worker state keyed by workerID
 	workers []workerState
-
 	// append-only storage for every directory path computed during the
 	// walk, shared across all workers. Lock-free/CAS-based (stores.StringStore),
 	// since every worker now writes into the same instance.
@@ -190,8 +207,9 @@ func NewWalkmanWithConfig(
 
 	w.workers = make([]workerState, pc.PoolSize)
 	for i := range w.workers {
-		w.workers[i].results = newResultArena(0, 0)
+		w.workers[i].results = newResultArena(0)
 		w.workers[i].spawnBuf = make([]walkItem, 8)
+		w.workers[i].entryScratch = make([]Entry, 0, entryNodeSize)
 	}
 
 	// The pool is bound to one Task at construction. Which one we hand it
@@ -221,25 +239,28 @@ func (w *Walkman) visit(
 	spawn func(...walkItem),
 ) error {
 	worker := &w.workers[workerID]
-	mark := worker.results.getEntryMark()
+	scratch := worker.entryScratch[:0]
 	err := readDirRaw(item.path, worker.buf[:], nil, w.conf.skipSet,
 		func(name []byte, dType uint8, ino uint64) error {
-			worker.results.storeEntry(
-				Entry{
-					parentDir: item.path,
-					name:      w.paths.StoreBytes(name),
-					ino:       ino,
-					typ:       dType,
-				})
+			scratch = append(scratch, Entry{
+				parentDir: item.path,
+				name:      w.paths.StoreBytes(name),
+				ino:       ino,
+				typ:       dType,
+			})
 			return nil
 		})
+	worker.entryScratch = scratch // keep the grown cap for the next directory
 	if err != nil {
 		// the directory itself couldn't be read. One DirErr, not a pool-wide abort.
 		res <- DirBatch{Dir: item.path, Errs: []DirErr{{Name: item.path, Err: err}}}
 		return nil
 	}
 
-	entries := worker.results.sliceEntry(mark)
+	// One reservation for the whole directory: lands contiguously in a
+	// single arena node (or its own allocation if it's bigger than one
+	// node) instead of scattering across repeated slice regrowths.
+	entries := worker.results.storeEntries(scratch)
 	res <- DirBatch{Dir: item.path, Entries: entries}
 
 	if w.conf.maxDepth != 0 && item.depth+1 > w.conf.maxDepth {
@@ -385,7 +406,7 @@ func (w *Walkman) Walk(root string) <-chan DirBatch {
 
 	// TODO: no followlinks handling for now
 	w.pool.Submit(walkItem{
-		path:  w.paths.StoreString(root),
+		path:  w.paths.StoreStringZ(root),
 		depth: 1,
 	})
 	return w.pool.Run()

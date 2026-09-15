@@ -45,6 +45,7 @@ set -euo pipefail
 
 WALKMAN_BIN=""
 IGNORE_PARALLEL_BIN=""
+ZLOB_BIN=""
 TREE=""
 WORKERS="1,2,4,$(nproc 2>/dev/null || echo 4)"
 RUNS=10
@@ -56,6 +57,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --walkman) WALKMAN_BIN="$2"; shift 2 ;;
     --ignore-parallel) IGNORE_PARALLEL_BIN="$2"; shift 2 ;;
+    --zlob-walk) ZLOB_BIN="$2"; shift 2 ;;
     --tree)    TREE="$2"; shift 2 ;;
     --workers) WORKERS="$2"; shift 2 ;;
     --runs)    RUNS="$2"; shift 2 ;;
@@ -78,8 +80,8 @@ if [[ -z "$TREE" ]]; then
   echo "missing required --tree (see --help)" >&2; exit 1
 fi
 
-if [[ -z "$WALKMAN_BIN" && -z "$IGNORE_PARALLEL_BIN" ]]; then
-  echo "missing at least one binary: specify --walkman or --ignore-parallel (see --help)" >&2; exit 1
+if [[ -z "$WALKMAN_BIN" && -z "$IGNORE_PARALLEL_BIN" && -z "$ZLOB_BIN" ]]; then
+  echo "missing at least one binary: specify --walkman, --ignore-parallel, or --zlob-walk (see --help)" >&2; exit 1
 fi
 
 # Locate a usable perf binary. On some distro kernels (custom/VM kernels
@@ -229,7 +231,13 @@ if [[ -n "$IGNORE_PARALLEL_BIN" ]]; then
   done
 fi
 
-
+if [[ -n "$ZLOB_BIN" ]]; then
+  for w in "${WLIST[@]}"; do
+    bench_tool "zlob-walk-cli (Rust, zlob::walk::WalkBuilder, workers=$w, follow-links=$FOLLOW_LINKS)" \
+      "zlob-walk" "$w" \
+      "$ZLOB_BIN" --quiet --workers "$w" "${FOLLOW_FLAG[@]}" "$TREE"
+  done
+fi
 
 # Integrity check: context-switches and cpu-migrations are software events
 # that should always work per the header comment above, but some

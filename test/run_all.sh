@@ -18,6 +18,7 @@
 #   ./run_all.sh \
 #       --walkman          ../build/walkman \
 #       --ignore-parallel  ../build/ignore-parallel-cli \
+#       --zlob-walk        ../build/zlob-walk-cli \
 #       --tree             /path/to/linux-7.2.2 \
 #       --workers          "1,2,4,$(nproc)" \
 #       --runs             10 \
@@ -34,6 +35,7 @@ set -euo pipefail
 
 WALKMAN_BIN=""
 IGNORE_PARALLEL_BIN=""
+ZLOB_BIN=""
 TREE=""
 WORKERS="1,2,4,$(nproc 2>/dev/null || echo 4)"
 RUNS=10
@@ -47,6 +49,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --walkman) WALKMAN_BIN="$2"; shift 2 ;;
     --ignore-parallel) IGNORE_PARALLEL_BIN="$2"; shift 2 ;;
+    --zlob-walk) ZLOB_BIN="$2"; shift 2 ;;
     --tree)    TREE="$2"; shift 2 ;;
     --workers) WORKERS="$2"; shift 2 ;;
     --runs)    RUNS="$2"; shift 2 ;;
@@ -77,8 +80,8 @@ if [[ -z "$TREE" ]]; then
   exit 1
 fi
 
-if [[ -z "$WALKMAN_BIN" && -z "$IGNORE_PARALLEL_BIN" ]]; then
-  echo "missing at least one binary: specify --walkman or --ignore-parallel (see --help)" >&2
+if [[ -z "$WALKMAN_BIN" && -z "$IGNORE_PARALLEL_BIN" && -z "$ZLOB_BIN" ]]; then
+  echo "missing at least one binary: specify --walkman, --ignore-parallel, or --zlob-walk (see --help)" >&2
   exit 1
 fi
 
@@ -127,6 +130,7 @@ TREE_LINKS=$(find "$TREE" -type l | wc -l)
   echo "cpu:  $(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | sed 's/^ *//' || echo unknown)"
   [[ -n "$WALKMAN_BIN" ]] && echo "walkman:          $(realpath -- "$WALKMAN_BIN")"
   [[ -n "$IGNORE_PARALLEL_BIN" ]] && echo "ignore-parallel:  $(realpath -- "$IGNORE_PARALLEL_BIN")"
+  [[ -n "$ZLOB_BIN" ]] && echo "zlob-walk:        $(realpath -- "$ZLOB_BIN")"
   echo "tree:             $(realpath -- "$TREE")"
   echo "tree dirs=$TREE_DIRS files=$TREE_FILES symlinks=$TREE_LINKS"
   echo "workers:  $WORKERS"
@@ -139,6 +143,7 @@ FAILURES=()
 common_args=(--tree "$TREE" --workers "$WORKERS")
 [[ -n "$WALKMAN_BIN" ]] && common_args+=(--walkman "$WALKMAN_BIN")
 [[ -n "$IGNORE_PARALLEL_BIN" ]] && common_args+=(--ignore-parallel "$IGNORE_PARALLEL_BIN")
+[[ -n "$ZLOB_BIN" ]] && common_args+=(--zlob-walk "$ZLOB_BIN")
 
 # Each harness call is allowed to fail without taking down the other —
 # bench_harness.sh in particular can write a complete, valid CSV and THEN
