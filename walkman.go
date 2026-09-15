@@ -31,18 +31,9 @@ type walkItem struct {
 	// openat straight against this string's backing bytes
 	path  string
 	depth uint32 // depth of this entry
-	// dev is the device number of the directory this item walks, used (only
-	// when followLinks is on) to record this directory's children in the
-	// ancestor chain: a child is on the same filesystem as the directory it
-	// was found in unless it is a mount point itself. Zero means "unknown",
-	// which can only happen if the root's own stat failed - in which case
-	// reading that same root fails too and nothing is ever spawned from it.
-	dev uint64
 	// ancestor is the link in the walk's shared ancestor chain describing
-	// *this* item's own directory (ino/dev of the directory, plus its own
-	// parent link). nil when followLinks is off, or for the root when the
-	// root couldn't be stat'ed. It is what a symlink found in this directory
-	// gets compared against, so work stealing can't break cycle detection.
+	// this item's own directory (ino/dev of the directory, plus its own
+	// parent link). nil when followLinks is off
 	ancestor *ancestorEntry
 }
 
@@ -146,11 +137,7 @@ type workerState struct {
 	// scratch buffer for spawning child items
 	spawnBuf []walkItem
 	// scratch buffer for accumulating one directory's entries before
-	// they're flushed into results.entries in a single storeEntries
-	// call. Reused across directories: reset to [:0] at the start of
-	// each visit, never reallocated below its high-water mark, so its
-	// own growth cost is bounded by the largest single directory this
-	// worker ever sees, not by the total entries over the whole walk.
+	// they're flushed into results.entries
 	entryScratch []Entry
 }
 
@@ -230,17 +217,13 @@ func NewWalkmanWithConfig(
 // readEntries reads one directory into the calling worker's entry scratch and
 // returns it, along with whether the listing contained a symlink at all.
 //
-// Both tasks read directories through here, so the plain walk and the
-// symlink-following walk share exactly one listing path: the only difference
-// between them is what they do with what this returns.
-//
 // The returned slice is worker scratch that the next directory reuses, so the
 // caller must copy it into the result arena (storeEntries does) and must not
 // hold on to it past that point.
 //
 // sawLink is what lets followLinks mode skip symlink handling entirely for the
 // overwhelming majority of directories, which contain no links at all. It
-// costs nothing: it comes off the d_type the kernel already handed us.
+// comes off the d_type the kernel already handed us.
 func (w *Walkman) readEntries(worker *workerState, item walkItem) (entries []Entry, sawLink bool, err error) {
 	scratch := worker.entryScratch[:0]
 	err = readDirRaw(item.path, worker.buf[:], w.conf.skipSet,
@@ -305,7 +288,7 @@ func (w *Walkman) visit(
 }
 
 // visitSym is visit's counterpart for followLinks. Same item type, same pool,
-// same batching/arena plumbing - it differs only in what it does with one
+// same batching/arena plumbing. It differs only in what it does with one
 // directory's entries before publishing them:
 //
 //   - every symlink entry is resolved with one os.Stat. That is the only
@@ -314,9 +297,7 @@ func (w *Walkman) visit(
 //     path are untouched,
 //   - a symlink that resolves to a directory is reported as that directory
 //     (the entry keeps the link's own name, but its type becomes DT_DIR so
-//     IsDir is true) and is then walked under the link's own path - matching
-//     walkdir's documented contract, "the yielded DirEntry represents the
-//     target... while the path corresponds to the link",
+//     IsDir is true) and is then walked under the link's own path
 //   - a symlink that resolves to anything else stays an ordinary entry,
 //     reporting the target's type,
 //   - a symlink that doesn't resolve at all (missing target, or a chain the
@@ -328,24 +309,7 @@ func (w *Walkman) visit(
 //
 // Cycle detection is pure (dev, ino) comparison against item.ancestor, the
 // walk's shared ancestor chain (ancestors.go): O(depth) integer comparisons,
-// zero syscalls, and it survives work stealing because the chain lives in the
-// store rather than on one worker's stack. The invariant that makes it work
-// is that an item's ancestor link always describes the item's *own* directory
-// - Walk seeds it for the root, and every spawn here links the child's own
-// identity onto the spawning directory's link.
-//
-// A plain child directory is recorded with the inode getdents64 reported for
-// it plus this directory's own device (walkItem.dev), so a walk that crosses a
-// mount point can in principle record a child's dev as its parent's. Crossing
-// a mount point *and* symlinking back into the already-visited part of it is
-// the one hole that leaves in this check. The alternative - fstat on the
-// directory fd just to learn a device number the caller already had - costs a
-// syscall per directory for every walk, symlinks present or not.
-//
-// Cost in this mode, over visit: one os.Stat per symlink entry, one contended
-// arena append per spawned directory, and (only for directories that actually
-// contain a link) the resolution pass below. A directory with no links in it
-// costs one d_type comparison per entry and nothing else.
+// zero syscalls.
 func (w *Walkman) visitSym(
 	_ context.Context,
 	workerID int,
@@ -367,30 +331,19 @@ func (w *Walkman) visitSym(
 	atMaxDepth := w.conf.maxDepth != 0 && item.depth+1 > w.conf.maxDepth
 	spawnBuf := worker.spawnBuf[:0]
 
-	// One pass over the listing that both resolves symlinks and builds the
-	// spawn list. visit gets away with a separate post-send loop because every
-	// directory entry there already carries the path and identity its child
-	// item needs; here the child path of a followed link and the identity of
-	// its *target* exist only inside this pass, so the work happens where the
-	// information is.
-	//
-	// When the listing held no symlink at all - every directory in a tree
-	// without links - the resolve branch below never fires, nothing is ever
-	// dropped, keep stays equal to i, so the write-back is skipped too. What
-	// is left is visit's own "is this a directory" check, and nothing else.
+	// One pass over the listing that both resolves symlinks and builds the spawn list
 	keep := 0
 	for i := range scratch {
 		e := scratch[i]
 
 		if sawLink && e.typ == dtLnk {
-			// The link's own path: what gets reported, and - when the target
-			// is a directory - what gets walked (see the contract note above).
+			// The link's own path: what gets reported and, when the target
+			// is a directory, what gets walked
 			childPath := w.paths.StorePathZ(item.path, e.name)
 
 			info, statErr := os.Stat(childPath)
 			if statErr != nil {
-				// Unresolvable: missing target, or a link chain the kernel
-				// refuses to follow. This entry leads nowhere walkable.
+				// Unresolvable. This entry leads nowhere walkable.
 				worker.results.storeDirErr(DirErr{Name: e.name, Err: ErrDanglingSymlink})
 				continue
 			}
@@ -408,8 +361,7 @@ func (w *Walkman) visitSym(
 			if !info.IsDir() {
 				// Symlink to a file/fifo/socket/device: not a traversal
 				// candidate, just an entry whose type describes the target now.
-				// Mutating the copy means this write-back is not optional, even
-				// when keep == i.
+				// Mutating the copy means this write-back is not optional, even when keep == i.
 				e.typ = dTypeFromInfo(info)
 				scratch[keep] = e
 				keep++
@@ -429,7 +381,7 @@ func (w *Walkman) visitSym(
 				spawnBuf = append(spawnBuf, walkItem{
 					path:     childPath,
 					depth:    item.depth + 1,
-					dev:      uint64(st.Dev),
+					// dev:      uint64(st.Dev),
 					ancestor: w.pushAncestor(workerID, st.Ino, uint64(st.Dev), item.ancestor),
 				})
 			}
@@ -442,13 +394,12 @@ func (w *Walkman) visitSym(
 			spawnBuf = append(spawnBuf, walkItem{
 				path:     w.paths.StorePathZ(item.path, e.name),
 				depth:    item.depth + 1,
-				dev:      item.dev,
-				ancestor: w.pushAncestor(workerID, e.ino, item.dev, item.ancestor),
+				// dev:      item.dev,
+				ancestor: w.pushAncestor(workerID, e.ino, item.ancestor.dev, item.ancestor),
 			})
 		}
 		if keep != i {
-			// Only reachable after a drop above: otherwise the entry is already
-			// in place and this would be a redundant 48-byte copy per entry.
+			// Only reachable after a drop above
 			scratch[keep] = e
 		}
 		keep++
@@ -505,16 +456,11 @@ func (w *Walkman) Walk(root string) <-chan DirBatch {
 	}
 
 	if w.conf.followLinks {
-		// Seed the ancestor chain with the root's own identity. The root is
-		// never the target of a spawn, so nothing else would ever add it -
-		// without this seed, a symlink pointing back at the walk root would go
-		// undetected and that subtree would grow without bound. The same stat
-		// gives the root's device, which every descendant inherits through
-		// walkItem.dev, so no directory needs its own dev lookup.
+		// Seed the ancestor chain with the root's own identity
 		if info, err := os.Stat(root); err == nil {
 			if st, ok := info.Sys().(*syscall.Stat_t); ok {
-				item.dev = uint64(st.Dev)
-				item.ancestor = w.pushAncestor(0, st.Ino, item.dev, nil)
+				// item.dev = uint64(st.Dev)
+				item.ancestor = w.pushAncestor(0, st.Ino, st.Dev, nil)
 			}
 		}
 	}

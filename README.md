@@ -314,5 +314,5 @@ This is a known, benign artifact of `workstealpool`'s unboxed Chase-Lev circular
 
 ## LLM Usage
 
-All walkman and workstealpool code is my own. LLM was used to write the rust ignore cli wrapper for benchmarking.
+All walkman and workstealpool code is my own. LLM was used to help write the rust cli wrappers for benchmarking.
 Also used for basic tests (with a lot of modifications afterwards), analysing benchmark output and populating the README's benchmark section.

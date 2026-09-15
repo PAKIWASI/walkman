@@ -9,8 +9,8 @@ const resArenaMinCapDirErrs = 4
 const entryNodeSize = 256
 
 // entryNode is one fixed-capacity chunk of the entries arena.
-// Once a node is no longer the tail, the arena never looks at it again; it's kept
-// alive only by whatever caller-held Entry slices still point into it.
+// Once a node is no longer the tail, the arena never looks at it again
+// it's kept alive only by whatever caller-held Entry slices still point into it
 type entryNode struct {
 	buf [entryNodeSize]Entry
 }
