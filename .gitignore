@@ -5,5 +5,4 @@ target/
 
 test/bench_results*
 test/FlameGraph
-test/gen_flame.sh
 *.svg
