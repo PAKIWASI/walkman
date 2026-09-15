@@ -53,10 +53,10 @@ func buildTree(t *testing.T, spec []string) string {
 // terminal error from Wait. It also enforces a hard timeout so a
 // termination bug (lost wakeup, deadlock) fails the test instead of
 // hanging the whole run.
-func drain(t *testing.T, w *Walkman, root string) ([]WalkResult, error) {
+func drain(t *testing.T, w *Walkman, root string) ([]DirBatch, error) {
 	t.Helper()
 
-	var results []WalkResult
+	var results []DirBatch
 	done := make(chan struct{})
 
 	go func() {
@@ -75,13 +75,13 @@ func drain(t *testing.T, w *Walkman, root string) ([]WalkResult, error) {
 	return results, w.Wait()
 }
 
-// countEntries sums direct file/dir entries across every WalkResult's Entries
+// countEntries sums direct file/dir entries across every DirBatch's Entries
 // (present whenever the directory itself was readable, regardless of any
 // per-entry errors alongside it) and every DirErr across every result,
 // the same convention BenchmarkWalk_* uses: a directory's entries are
 // counted once, from its own listing, not re-derived from recursing into
 // it again.
-func countEntries(results []WalkResult) (files, dirs int, errs int) {
+func countEntries(results []DirBatch) (files, dirs int, errs int) {
 	for _, r := range results {
 		errs += len(r.Errs)
 		for _, e := range r.Entries {
@@ -96,9 +96,9 @@ func countEntries(results []WalkResult) (files, dirs int, errs int) {
 }
 
 // walkedDirs returns the sorted set of directories a Walkman walk
-// actually visited (i.e. got its own WalkResult for), independent of
+// actually visited (i.e. got its own DirBatch for), independent of
 // delivery order.
-func walkedDirs(results []WalkResult) []string {
+func walkedDirs(results []DirBatch) []string {
 	dirs := make([]string, 0, len(results))
 	for _, r := range results {
 		dirs = append(dirs, r.Dir)
@@ -219,7 +219,7 @@ func TestWalk_NestedTree_MatchesFilepathWalkDir(t *testing.T) {
 	}
 
 	// Every directory in the tree (including empty ones and the root)
-	// must get exactly one WalkResult.
+	// must get exactly one DirBatch.
 	wantDirsVisited := []string{
 		root,
 		filepath.Join(root, "a"),
@@ -458,7 +458,7 @@ func TestWalk_FollowLinks_True_Descends(t *testing.T) {
 	// target path - matching walkdir's own documented contract ("the
 	// yielded DirEntry represents the target... while the path corresponds
 	// to the link"). It's not resolved via filepath.EvalSymlinks.
-	var found *WalkResult
+	var found *DirBatch
 	for i := range results {
 		if results[i].Dir == link {
 			found = &results[i]
@@ -578,7 +578,7 @@ func TestWalk_PermissionDenied_IsRecoverable(t *testing.T) {
 		t.Fatalf("Wait() = %v, want nil (one bad subdir shouldn't cancel the pool)", err)
 	}
 
-	var lockedResult *WalkResult
+	var lockedResult *DirBatch
 	okCount := 0
 	for i, r := range results {
 		if r.Dir == locked {
@@ -828,11 +828,11 @@ func itoa(n int) string {
 // wantCycleErr fails the test unless: Wait() came back nil (a symlink cycle
 // is a per-entry error, not a fatal one - it must not abort the walk or show
 // up on Wait, same as a permission-denied readDir or a dangling symlink),
-// and at least one drained WalkResult carries an Err mentioning "cycle".
+// and at least one drained DirBatch carries an Err mentioning "cycle".
 // (A tree can legitimately trip cycle detection more than once - e.g. two
 // symlinks pointing at each other get caught independently, once from each
 // side - so this only asserts presence, not count.)
-func wantCycleErr(t *testing.T, results []WalkResult, err error) {
+func wantCycleErr(t *testing.T, results []DirBatch, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatalf("Wait() = %v, want nil (symlink cycle is a per-entry error)", err)
@@ -842,7 +842,7 @@ func wantCycleErr(t *testing.T, results []WalkResult, err error) {
 	}
 }
 
-func countCycleErrs(results []WalkResult) int {
+func countCycleErrs(results []DirBatch) int {
 	var n int
 	for _, r := range results {
 		for _, ie := range r.Errs {
@@ -972,7 +972,7 @@ func TestWalk_SymlinkCycle_False_NeverChecked(t *testing.T) {
 // side-by-side (not nested) should walk fine, not be flagged as a cycle.
 // c/link_to_d -> d and d/link_to_c -> c, but c and d are siblings, not one
 // inside the other, so following both links in sequence never revisits a
-// dirKey already on the current path.
+// (dev, ino) pair already on the current path's ancestor chain.
 func TestWalk_Symlink_SiblingDirsNoFalseCycle(t *testing.T) {
 	root := buildTree(t, []string{
 		"c/",
@@ -1046,54 +1046,8 @@ func TestWalk_SymlinkCycle_ErrorIsFirstAndOnly(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
-// fakeDirEntry: a minimal fs.DirEntry with a controllable Name(), so
-// filterSkipped can be tested against exact, deterministic orderings.
-// Real directory reads (readDir/ReadDir(-1)) do NOT guarantee any
-// particular order, which is exactly why the swap-delete bug below
-// couldn't be pinned down through an integration test against a real
-// tempdir tree — the entry order there is filesystem-dependent, not
-// something a test can force.
+// Shared assertion/helper used by the readDirRaw and walk-level skip tests
 // ---------------------------------------------------------------------
-
-type fakeDirEntry struct {
-	name  string
-	isDir bool
-}
-
-func (f fakeDirEntry) Name() string { return f.name }
-func (f fakeDirEntry) IsDir() bool  { return f.isDir }
-func (f fakeDirEntry) Type() fs.FileMode {
-	if f.isDir {
-		return fs.ModeDir
-	}
-	return 0
-}
-func (f fakeDirEntry) Info() (fs.FileInfo, error) { return fakeFileInfo(f), nil }
-
-type fakeFileInfo fakeDirEntry
-
-func (f fakeFileInfo) Name() string       { return f.name }
-func (f fakeFileInfo) Size() int64        { return 0 }
-func (f fakeFileInfo) Mode() fs.FileMode  { return fakeDirEntry(f).Type() }
-func (f fakeFileInfo) ModTime() time.Time { return time.Time{} }
-func (f fakeFileInfo) IsDir() bool        { return f.isDir }
-func (f fakeFileInfo) Sys() any           { return nil }
-
-func entries(names ...string) []fs.DirEntry {
-	out := make([]fs.DirEntry, len(names))
-	for i, n := range names {
-		out[i] = fakeDirEntry{name: n}
-	}
-	return out
-}
-
-func names(dirs []fs.DirEntry) []string {
-	out := make([]string, len(dirs))
-	for i, d := range dirs {
-		out[i] = d.Name()
-	}
-	return out
-}
 
 // assertSameSet fails unless got and want contain exactly the same
 // elements (any order, no duplicates counted twice).
@@ -1119,120 +1073,9 @@ func assertSameSet(t *testing.T, got, want []string) {
 	}
 }
 
-// ---------------------------------------------------------------------
-// filterSkipped: direct unit tests, order-controlled
-// ---------------------------------------------------------------------
-
-func TestFilterSkipped_NoSkipSet_ReturnsUnchanged(t *testing.T) {
-	in := entries("a", "b", "c")
-	out := filterSkipped(in, nil)
-	assertSameSet(t, names(out), []string{"a", "b", "c"})
-}
-
-func TestFilterSkipped_EmptyInput(t *testing.T) {
-	out := filterSkipped(entries(), skipSetOf("a"))
-	if len(out) != 0 {
-		t.Fatalf("got %v, want empty", names(out))
-	}
-}
-
-func TestFilterSkipped_NoneMatch(t *testing.T) {
-	in := entries("a", "b", "c")
-	out := filterSkipped(in, skipSetOf("zzz"))
-	assertSameSet(t, names(out), []string{"a", "b", "c"})
-}
-
-func TestFilterSkipped_AllMatch(t *testing.T) {
-	in := entries("a", "b", "c")
-	out := filterSkipped(in, skipSetOf("a", "b", "c"))
-	if len(out) != 0 {
-		t.Fatalf("got %v, want empty", names(out))
-	}
-}
-
-func TestFilterSkipped_SingleMatch_Head(t *testing.T) {
-	in := entries("skip", "keep1", "keep2")
-	out := filterSkipped(in, skipSetOf("skip"))
-	assertSameSet(t, names(out), []string{"keep1", "keep2"})
-}
-
-func TestFilterSkipped_SingleMatch_Tail(t *testing.T) {
-	in := entries("keep1", "keep2", "skip")
-	out := filterSkipped(in, skipSetOf("skip"))
-	assertSameSet(t, names(out), []string{"keep1", "keep2"})
-}
-
-func TestFilterSkipped_SingleMatch_Middle(t *testing.T) {
-	in := entries("keep1", "skip", "keep2")
-	out := filterSkipped(in, skipSetOf("skip"))
-	assertSameSet(t, names(out), []string{"keep1", "keep2"})
-}
-
-// TestFilterSkipped_HeadAndTailMatch_MiddleSurvives is the exact repro of
-// the swap-delete bug: a match at index 0 gets overwritten with the last
-// element, which is itself a match — and without re-examining index 0,
-// that swapped-in match is never removed, while the untouched middle
-// "keep" entry silently disappears when the slice is truncated.
-//
-// With [skipA, keep, skipB]:
-//   - i=0: skipA matches -> dirs[0] = dirs[2] (skipB), len drops to 2
-//   - i=1: keep does not match -> left alone
-//   - if the loop does NOT recheck index 0, it never sees that dirs[0]
-//     is now skipB (also a match), so skipB survives in the result and
-//     "keep" is gone entirely.
-func TestFilterSkipped_HeadAndTailMatch_MiddleSurvives(t *testing.T) {
-	in := entries("skipA", "keep", "skipB")
-	out := filterSkipped(in, skipSetOf("skipA", "skipB"))
-	assertSameSet(t, names(out), []string{"keep"})
-}
-
-// TestFilterSkipped_ConsecutiveMatchesAtTail covers the case where the
-// element swapped into a matched slot is *itself* freshly matched
-// (rather than pre-existing), which only happens once you have 3+
-// matches clustered near the end.
-func TestFilterSkipped_ConsecutiveMatchesAtTail(t *testing.T) {
-	in := entries("keep", "skip1", "skip2", "skip3")
-	out := filterSkipped(in, skipSetOf("skip1", "skip2", "skip3"))
-	assertSameSet(t, names(out), []string{"keep"})
-}
-
-// TestFilterSkipped_EveryAdjacentPairAtTail sweeps every 2-matches-out-of-N
-// combination so any position-dependent variant of the swap-delete bug
-// (not just head+tail) gets exercised, not just the one pattern above.
-func TestFilterSkipped_EveryAdjacentPairAtTail(t *testing.T) {
-	base := []string{"n0", "n1", "n2", "n3", "n4"}
-	for skipI := range base {
-		for skipJ := range base {
-			if skipI == skipJ {
-				continue
-			}
-			skip := skipSetOf(base[skipI], base[skipJ])
-			var want []string
-			for _, n := range base {
-				if n != base[skipI] && n != base[skipJ] {
-					want = append(want, n)
-				}
-			}
-			in := entries(base...)
-			out := filterSkipped(in, skip)
-			if len(out) != len(want) {
-				t.Fatalf("skip={%s,%s}: got %v, want set %v", base[skipI], base[skipJ], names(out), want)
-			}
-			assertSameSet(t, names(out), want)
-		}
-	}
-}
-
-func TestFilterSkipped_DuplicateNames_AllInstancesRemoved(t *testing.T) {
-	// Not a realistic filesystem state (a real dir can't have two entries
-	// with the same name), but filterSkipped shouldn't assume uniqueness
-	// beyond what the caller guarantees - matching purely on skipSet
-	// membership, so every occurrence goes.
-	in := entries("skip", "keep", "skip", "skip")
-	out := filterSkipped(in, skipSetOf("skip"))
-	assertSameSet(t, names(out), []string{"keep"})
-}
-
+// skipSetOf builds the skip set shape readDirRaw takes: a plain
+// name-keyed membership set, matched against each entry's basename at
+// every depth (a match prunes the whole subtree for directories).
 func skipSetOf(names ...string) map[string]struct{} {
 	s := make(map[string]struct{}, len(names))
 	for _, n := range names {
@@ -1241,55 +1084,14 @@ func skipSetOf(names ...string) map[string]struct{} {
 	return s
 }
 
-// TestFilterSkipped_DoesNotAllocate guarantees the swap-delete is truly
-// in-place: no new backing array, no per-call heap traffic. work is reset
-// from backup via copy() before each timed call (copying into an
-// already-sized destination doesn't itself allocate), so any non-zero
-// AllocsPerRun result can only come from filterSkipped.
-func TestFilterSkipped_DoesNotAllocate(t *testing.T) {
-	orig := entries("a", "skip1", "b", "skip2", "c", "skip3", "d")
-	backup := make([]fs.DirEntry, len(orig))
-	copy(backup, orig)
-	work := make([]fs.DirEntry, len(orig))
-	skip := skipSetOf("skip1", "skip2", "skip3")
-
-	allocs := testing.AllocsPerRun(1000, func() {
-		copy(work, backup)
-		_ = filterSkipped(work, skip)
-	})
-
-	if allocs != 0 {
-		t.Fatalf("filterSkipped allocated %.1f times per call, want 0 (swap-delete must stay in-place)", allocs)
-	}
-}
-
-// TestFilterSkipped_SharesUnderlyingArray backs up the allocation
-// guarantee with a structural check: reslicing (dirs[:n]) always keeps
-// the same cap as the original slice, since cap only shrinks on a fresh
-// allocation (append past capacity) - never on a plain reslice. A future
-// change that swapped filterSkipped's reslice for e.g. append(out[:0],
-// ...) or a fresh make() would still pass DoesNotAllocate in the trivial
-// all-kept case but would show up here as a cap mismatch.
-func TestFilterSkipped_SharesUnderlyingArray(t *testing.T) {
-	in := entries("a", "skip", "b", "c")
-	wantCap := cap(in)
-
-	out := filterSkipped(in, skipSetOf("skip"))
-
-	if cap(out) != wantCap {
-		t.Fatalf("cap(out) = %d, want %d (result must reslice the same backing array, not allocate a new one)",
-			cap(out), wantCap)
-	}
-}
-
 // ---------------------------------------------------------------------
 // Integration-level regression: large mixed skip/keep fanout.
 //
-// This can't force a specific readDir order the way the unit tests
-// above do, but with enough entries and a good fraction skipped, the
-// tail-cluster pattern shows up often enough across sub-tests that a
-// regression here should fail reliably rather than needing exact
-// ordering control.
+// A real directory read can't force a specific getdents64 order the way a
+// direct readDirRaw test can, but with enough entries and a good fraction
+// skipped, a skip-filtering regression shows up often enough across
+// sub-tests that it fails reliably rather than needing exact ordering
+// control.
 // ---------------------------------------------------------------------
 
 func TestWalk_SkipList_LargeMixedFanout(t *testing.T) {
@@ -1585,3 +1387,193 @@ func TestWalk_LargeFlatDirectory(t *testing.T) {
 	}
 }
 
+
+// ---------------------------------------------------------------------
+// followLinks mode: fast path, drop isolation, entry semantics
+// ---------------------------------------------------------------------
+
+// TestWalk_FollowLinks_NoSymlinks_MatchesPlainWalk pins the one thing the
+// followLinks fast path can silently break: a tree with no symlinks at all has
+// to produce exactly the same walk as followLinks=false. That path skips the
+// symlink resolution pass for every directory (sawLink is false throughout), so
+// a bug in it - a lost entry, a spurious write-back, a missing spawn - would
+// show up as a visit-set or count mismatch here and nowhere else.
+func TestWalk_FollowLinks_NoSymlinks_MatchesPlainWalk(t *testing.T) {
+	root := buildTree(t, []string{
+		"root.txt",
+		"a/",
+		"a/a1.txt",
+		"a/suba/",
+		"a/suba/deep.txt",
+		"b/",
+		"b/b1.txt",
+		"c/", // empty dir, so the empty-batch path is covered in this mode too
+	})
+
+	plain, err := drain(t, NewWalkman(false, 0, nil), root)
+	if err != nil {
+		t.Fatalf("followLinks=false: Wait() = %v, want nil", err)
+	}
+	followed, err := drain(t, NewWalkman(true, 0, nil), root)
+	if err != nil {
+		t.Fatalf("followLinks=true: Wait() = %v, want nil", err)
+	}
+
+	plainDirs, followedDirs := walkedDirs(plain), walkedDirs(followed)
+	if len(plainDirs) != len(followedDirs) {
+		t.Fatalf("visited %d dirs with followLinks=false, %d with true\nplain:    %v\nfollowed: %v",
+			len(plainDirs), len(followedDirs), plainDirs, followedDirs)
+	}
+	for i := range plainDirs {
+		if plainDirs[i] != followedDirs[i] {
+			t.Fatalf("visited dirs differ:\nplain:    %v\nfollowed: %v", plainDirs, followedDirs)
+		}
+	}
+
+	pFiles, pDirs, pErrs := countEntries(plain)
+	fFiles, fDirs, fErrs := countEntries(followed)
+	if pFiles != fFiles || pDirs != fDirs || pErrs != fErrs {
+		t.Fatalf("counts differ: plain files=%d dirs=%d errs=%d, followLinks files=%d dirs=%d errs=%d",
+			pFiles, pDirs, pErrs, fFiles, fDirs, fErrs)
+	}
+	if fErrs != 0 {
+		t.Fatalf("followLinks walk of a link-free tree reported %d errors, want 0", fErrs)
+	}
+}
+
+// TestWalk_FollowLinks_KeepsGoodEntriesAlongsideErrors is the drop-isolation
+// check: a dangling link is reported in Errs and dropped from Entries, but its
+// siblings - including the directory that still has to be walked - have to come
+// through the same in-place compaction untouched. Asserting the surviving set
+// exactly (not "at least these") is what would catch an off-by-one in the
+// compaction indices.
+func TestWalk_FollowLinks_KeepsGoodEntriesAlongsideErrors(t *testing.T) {
+	root := buildTree(t, []string{
+		"ok.txt",
+		"sub/inner.txt",
+	})
+	skipIfNoSymlinkSupport(t, root)
+
+	if err := os.Symlink(filepath.Join(root, "missing"), filepath.Join(root, "dangling")); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	results, err := drain(t, NewWalkman(true, 0, nil), root)
+	if err != nil {
+		t.Fatalf("Wait() = %v, want nil", err)
+	}
+
+	var rootBatch *DirBatch
+	for i := range results {
+		if results[i].Dir == root {
+			rootBatch = &results[i]
+		}
+	}
+	if rootBatch == nil {
+		t.Fatalf("no result for root; visited %v", walkedDirs(results))
+	}
+
+	if len(rootBatch.Errs) != 1 {
+		t.Fatalf("root Errs = %+v, want exactly the one dangling link", rootBatch.Errs)
+	}
+	if !errors.Is(rootBatch.Errs[0].Err, ErrDanglingSymlink) {
+		t.Errorf("root Errs[0].Err = %v, want ErrDanglingSymlink", rootBatch.Errs[0].Err)
+	}
+
+	var got []string
+	for _, e := range rootBatch.Entries {
+		got = append(got, e.Name())
+	}
+	assertSameSet(t, got, []string{"ok.txt", "sub"})
+
+	// the surviving directory is still walked, and holds its own entry
+	walkedSub := false
+	for _, r := range results {
+		if r.Dir != filepath.Join(root, "sub") {
+			continue
+		}
+		walkedSub = true
+		if len(r.Entries) != 1 || r.Entries[0].Name() != "inner.txt" {
+			t.Errorf("sub Entries = %v, want exactly [inner.txt]", r.Entries)
+		}
+		if len(r.Errs) != 0 {
+			t.Errorf("sub Errs = %+v, want none", r.Errs)
+		}
+	}
+	if !walkedSub {
+		t.Errorf("directory sub was never walked; visited %v", walkedDirs(results))
+	}
+}
+
+// TestWalk_FollowLinks_EntriesReportResolvedType: how a followed link looks to
+// a consumer. The entry keeps the link own name and path - that is what makes
+// it reportable, and walkable, at the link location - while its type describes
+// the target: IsDir true (so it is spawnable) for a link to a directory, a
+// regular file for a link to a file.
+func TestWalk_FollowLinks_EntriesReportResolvedType(t *testing.T) {
+	root := buildTree(t, []string{
+		"f.txt",
+		"sub/inner.txt",
+	})
+	skipIfNoSymlinkSupport(t, root)
+
+	if err := os.Symlink(filepath.Join(root, "sub"), filepath.Join(root, "link_to_dir")); err != nil {
+		t.Fatalf("Symlink (dir): %v", err)
+	}
+	if err := os.Symlink(filepath.Join(root, "f.txt"), filepath.Join(root, "link_to_file")); err != nil {
+		t.Fatalf("Symlink (file): %v", err)
+	}
+
+	results, err := drain(t, NewWalkman(true, 0, nil), root)
+	if err != nil {
+		t.Fatalf("Wait() = %v, want nil", err)
+	}
+
+	var rootBatch *DirBatch
+	for i := range results {
+		if results[i].Dir == root {
+			rootBatch = &results[i]
+		}
+	}
+	if rootBatch == nil {
+		t.Fatal("no result for root")
+	}
+
+	byName := make(map[string]Entry, len(rootBatch.Entries))
+	for _, e := range rootBatch.Entries {
+		byName[e.Name()] = e
+	}
+
+	toDir, ok := byName["link_to_dir"]
+	if !ok {
+		t.Fatalf("link_to_dir missing from root Entries: %v", rootBatch.Entries)
+	}
+	if !toDir.IsDir() {
+		t.Error("link_to_dir.IsDir() = false, want true (its target is a directory)")
+	}
+	if toDir.Type() != fs.ModeDir {
+		t.Errorf("link_to_dir.Type() = %v, want %v", toDir.Type(), fs.ModeDir)
+	}
+
+	toFile, ok := byName["link_to_file"]
+	if !ok {
+		t.Fatalf("link_to_file missing from root Entries: %v", rootBatch.Entries)
+	}
+	if toFile.IsDir() {
+		t.Error("link_to_file.IsDir() = true, want false")
+	}
+	if toFile.Type() != 0 {
+		t.Errorf("link_to_file.Type() = %v, want 0 (regular file)", toFile.Type())
+	}
+
+	// a followed directory is walked at the link own path, not the target's
+	walkedLink := false
+	for _, r := range results {
+		if r.Dir == filepath.Join(root, "link_to_dir") {
+			walkedLink = true
+		}
+	}
+	if !walkedLink {
+		t.Errorf("link_to_dir was not walked at its own path; visited %v", walkedDirs(results))
+	}
+}

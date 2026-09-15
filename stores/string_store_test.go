@@ -3,9 +3,11 @@ package stores
 import (
 	"fmt"
 	"math/rand"
+	"os"
 	"strings"
 	"sync"
 	"testing"
+	"unsafe"
 )
 
 func TestStoreAndRetrieveBasic(t *testing.T) {
@@ -46,7 +48,7 @@ func TestEmptyString(t *testing.T) {
 func TestExactNodeBoundaryStr(t *testing.T) {
 	ss := NewStringStore()
 	prefix := ss.StoreString("abc") // off is now 3
-	exact := strings.Repeat("x", stringStoreNodeSize-3)
+	exact := strings.Repeat("x", defaultGenericNodeSize-3)
 	got := ss.StoreString(exact)
 	if got != exact {
 		t.Fatalf("exact-fit string corrupted: len(got)=%d want %d", len(got), len(exact))
@@ -86,7 +88,7 @@ func TestGrowsAcrossManyNodesStr(t *testing.T) {
 // bigger than a single node.
 func TestOversizedString(t *testing.T) {
 	ss := NewStringStore()
-	big := strings.Repeat("q", stringStoreNodeSize+1)
+	big := strings.Repeat("q", defaultGenericNodeSize+1)
 	got := ss.StoreString(big)
 	if got != big {
 		t.Fatalf("oversized string corrupted: len(got)=%d want %d", len(got), len(big))
@@ -94,9 +96,9 @@ func TestOversizedString(t *testing.T) {
 
 	// mix an oversized store with normal ones around it
 	small1 := ss.StoreString("before")
-	huge := ss.StoreString(strings.Repeat("Q", stringStoreNodeSize*3))
+	huge := ss.StoreString(strings.Repeat("Q", defaultGenericNodeSize*3))
 	small2 := ss.StoreString("after")
-	if small1 != "before" || small2 != "after" || huge != strings.Repeat("Q", stringStoreNodeSize*3) {
+	if small1 != "before" || small2 != "after" || huge != strings.Repeat("Q", defaultGenericNodeSize*3) {
 		t.Fatalf("oversized store corrupted neighboring stores: before=%q after=%q hugeLen=%d",
 			small1, small2, len(huge))
 	}
@@ -150,7 +152,7 @@ func TestConcurrentMixedWithOversized(t *testing.T) {
 			defer wg.Done()
 			var want string
 			if g%5 == 0 {
-				want = strings.Repeat(fmt.Sprintf("%d", g%10), stringStoreNodeSize+100)
+				want = strings.Repeat(fmt.Sprintf("%d", g%10), defaultGenericNodeSize+100)
 			} else {
 				want = fmt.Sprintf("small-%d", g)
 			}
@@ -184,4 +186,92 @@ func TestZeroLengthUnderContention(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// byteAfter returns the byte sitting immediately past the end of s data. It is
+// only meaningful for strings handed out by the Z variants, which deliberately
+// reserve that byte; reading it for any other string would be out of bounds.
+func byteAfter(s string) byte {
+	return *(*byte)(unsafe.Add(unsafe.Pointer(unsafe.StringData(s)), len(s)))
+}
+
+// TestStoreStringZ_NULTerminator: the entire point of the Z variants. The
+// returned string length stops at the string content, but the arena byte right
+// after it is reserved and zeroed, so the result can be handed to a raw syscall
+// as a C string without a copy. A plain Go string offers no such guarantee -
+// reading past its end is exactly the bug this API exists to avoid.
+func TestStoreStringZ_NULTerminator(t *testing.T) {
+	ss := NewStringStore()
+
+	// One string per size class: empty, small, exactly one node, and past a
+	// node (the dedicated-allocation path).
+	inputs := []string{
+		"",
+		"a",
+		"some/longer/path",
+		strings.Repeat("x", defaultGenericNodeSize),
+		strings.Repeat("y", defaultGenericNodeSize+1),
+	}
+
+	for _, in := range inputs {
+		got := ss.StoreStringZ(in)
+		if got != in {
+			t.Errorf("StoreStringZ(len %d) = %q..., want the same content", len(in), got[:min(len(got), 16)])
+			continue
+		}
+		if len(in) == 0 {
+			// unsafe.StringData is allowed to return nil for a zero-length
+			// string, so there is no byte to inspect here. Empty paths are not
+			// something the walker ever produces anyway.
+			continue
+		}
+		if b := byteAfter(got); b != 0 {
+			t.Errorf("StoreStringZ(len %d): byte at data[len] = %d, want 0 (NUL terminator)", len(in), b)
+		}
+	}
+}
+
+// TestStorePathZ_JoinAndTerminator: parent and child joined with exactly one OS
+// separator (whether or not the parent already ends in one), NUL-terminated
+// like StoreStringZ, since these are the strings openDirZ hands to openat.
+func TestStorePathZ_JoinAndTerminator(t *testing.T) {
+	ss := NewStringStore()
+	sep := string(os.PathSeparator)
+
+	tests := []struct {
+		name          string
+		parent, child string
+		want          string
+	}{
+		{"absolute parent", sep + "tmp", "child", sep + "tmp" + sep + "child"},
+		{"parent already ends in a separator", sep + "tmp" + sep, "child", sep + "tmp" + sep + "child"},
+		{"relative parent", "relative", "child", "relative" + sep + "child"},
+		{"nested parent", "a" + sep + "b", "c.txt", "a" + sep + "b" + sep + "c.txt"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ss.StorePathZ(tt.parent, tt.child)
+			if got != tt.want {
+				t.Errorf("StorePathZ(%q, %q) = %q, want %q", tt.parent, tt.child, got, tt.want)
+			}
+			if b := byteAfter(got); b != 0 {
+				t.Errorf("StorePathZ(%q, %q): byte at data[len] = %d, want 0", tt.parent, tt.child, b)
+			}
+		})
+	}
+}
+
+// TestStorePath_Join covers the non-Z sibling: same join rules, no reserved
+// terminator (nothing hands this one to a syscall).
+func TestStorePath_Join(t *testing.T) {
+	ss := NewStringStore()
+	sep := string(os.PathSeparator)
+
+	if got, want := ss.StorePath(sep+"tmp", "child"), sep+"tmp"+sep+"child"; got != want {
+		t.Errorf("StorePath = %q, want %q", got, want)
+	}
+	if got, want := ss.StorePath(sep+"tmp"+sep, "child"), sep+"tmp"+sep+"child"; got != want {
+		t.Errorf("StorePath (parent already ends in a separator) = %q, want %q", got, want)
+	}
 }

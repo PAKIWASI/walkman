@@ -75,7 +75,6 @@ func byteToString(buf []byte) string {
 func readDirRaw(
 	dirPath string, // the directory to read; MUST be NUL-terminated (see openDirZ)
 	buf []byte, // per worker scratch buf
-	devOut *uint64, // non-nil only in followLinks mode; filled with this directory's device number
 	skip map[string]struct{},
 	onEntry func(name []byte, dType uint8, ino uint64) error,
 ) error {
@@ -85,15 +84,6 @@ func readDirRaw(
 		return err
 	}
 	defer syscall.Close(fd)
-
-	// get the dev no out if symlink following is on
-	if devOut != nil {
-		var st syscall.Stat_t
-		if err := syscall.Fstat(fd, &st); err != nil {
-			return err
-		}
-		*devOut = uint64(st.Dev)
-	}
 
 	for {
 		// this syscall places directory entries into the passed buf, as many that can fit
