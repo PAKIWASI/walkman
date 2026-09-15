@@ -79,7 +79,7 @@ func (e Entry) FileMode() fs.FileMode {
 	}
 }
 
-// lazy entry info
+// Info gives lazy Lstat on entry
 func (e Entry) Info() (fs.FileInfo, error) {
 	return os.Lstat(filepath.Join(e.parentDir, e.name))
 }
@@ -271,7 +271,7 @@ func (w *Walkman) visit(
 	spawnBuf := worker.spawnBuf[:0]
 
 	for i := range entries {
-		if entries[i].Type().Type().IsDir() {
+		if entries[i].IsDir() {
 			// allocate the full path to the subdir and store it in the arena
 			spawnBuf = append(spawnBuf, walkItem{
 				path:  w.paths.StorePathZ(item.path, entries[i].name),
