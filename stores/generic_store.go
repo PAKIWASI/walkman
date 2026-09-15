@@ -1,11 +1,28 @@
 package stores
 
 import (
+	"runtime"
 	"sync/atomic"
 )
 
+// maxSpins is the number of consecutive failed CAS attempts ensureCap
+// will make before yielding to the scheduler instead of immediately retrying.
+const maxSpins = 50
+
+// spinOrYield counts a failed CAS attempt and, once maxSpins is hit,
+// yields the current goroutine to the scheduler and resets the count.
+// It returns the (possibly reset) spin count for the caller to keep track of.
+func spinOrYield(spins int) int {
+	spins++
+	if spins >= maxSpins {
+		runtime.Gosched()
+		return 0
+	}
+	return spins
+}
+
 // defaultGenericNodeSize is the number of elements each GenericNode holds.
-const defaultGenericNodeSize = 1016
+const defaultGenericNodeSize = 1024
 
 // GenericNode is a single fixed-capacity arena chunk. off tracks how many
 // elements have been claimed so far (not necessarily written yet) and

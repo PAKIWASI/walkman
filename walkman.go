@@ -252,7 +252,7 @@ func (w *Walkman) visit(
 		if entries[i].Type().Type().IsDir() {
 			// allocate the full path to the subdir and store it in the arena
 			spawnBuf = append(spawnBuf, walkItem{
-				path:  w.paths.StorePath(item.path, entries[i].name),
+				path:  w.paths.StorePathZ(item.path, entries[i].name),
 				depth: item.depth + 1,
 			})
 		}

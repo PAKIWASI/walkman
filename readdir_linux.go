@@ -1,6 +1,7 @@
 package walkman
 
 import (
+	"bytes"
 	"syscall"
 	"unsafe"
 )
@@ -94,9 +95,9 @@ func readDirRaw(
 			maxLen := int(reclen) - direntNameOffset
 
 			nameBytes := unsafe.Slice((*byte)(namePtr), maxLen) // make a slice header that point to those maxLen bytes
-			nameLen := 0
-			for nameLen < maxLen && nameBytes[nameLen] != 0 { // find the len of the string by looking for the NULL terminator
-				nameLen++
+			nameLen := bytes.IndexByte(nameBytes, 0)            // NUL terminator
+			if nameLen < 0 {
+				nameLen = maxLen // defensive: ABI guarantees NUL-termination within reclen
 			}
 			name := nameBytes[:nameLen] // make a slice that points to the actual string (without NULL)
 
