@@ -6,7 +6,7 @@ import (
 )
 
 const (
-	getdentsBufSize  = 64 * 1024 // 32 KB per worker
+	getdentsBufSize  = 64 * 1024 // 64 KB per worker
 	sysGetdents64    = syscall.SYS_GETDENTS64
 	direntNameOffset = 19 // uint64(8) + int64(8) + uint16(2) + uint8(1) = 19, no padding on this ABI
 

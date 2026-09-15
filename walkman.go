@@ -37,13 +37,9 @@ type walkItem struct {
 // Name identifies which file/dir caused the error, while
 // WalkResult.Dir is the directory being listed.
 type DirErr struct {
-	name string
-	err  error
+	Name string
+	Err  error
 }
-
-func (derr DirErr) Name() string { return derr.name }
-
-func (derr DirErr) Err() error { return derr.err }
 
 // Entry / DirBatch: per-batch, offset-based, not persistent
 //
@@ -90,7 +86,7 @@ func (e Entry) FileMode() fs.FileMode {
 
 // lazy entry info
 func (e Entry) Info() (fs.FileInfo, error) {
-	return os.Lstat(filepath.Join(e.parentDir, e.Name()))
+	return os.Lstat(filepath.Join(e.parentDir, e.name))
 }
 
 var _ fs.DirEntry = Entry{}
@@ -104,12 +100,10 @@ var _ fs.DirEntry = Entry{}
 // Entries is nil only when the directory itself couldn't be read at all, in
 // which case Errs holds exactly that one failure.
 type DirBatch struct {
-	dir     string   // this directory's full path
+	Dir     string   // this directory's full path
 	Entries []Entry  // flat slice of entries
 	Errs    []DirErr // nil if no errors in this directory
 }
-
-func (b *DirBatch) Dir() string { return b.dir }
 
 type walkConf struct {
 	followLinks bool                // off by default
@@ -140,12 +134,6 @@ func DefaultPoolConfig() PoolConfig {
 type workerState struct {
 	// raw buf for the getdents64 syscall. Sized to getdentsBufSize (32 KB, matching readdir_linux.go)
 	buf [getdentsBufSize]byte
-	// append-only storage for all directory paths this worker computes
-	// Persistent for the worker's lifetime
-	paths *stores.StringStore
-	// per-worker ancestor chain storage for symlink-cycle detection
-	// Unused, and never allocated when followLinks is off
-	ancestors *stores.GenericStore[ancestorEntry]
 
 	results resultArena
 	// scratch buffer for spawning child items
@@ -157,6 +145,14 @@ type Walkman struct {
 	pool *wsp.WorkerPool[walkItem, DirBatch]
 	// per-worker state keyed by workerID
 	workers []workerState
+
+	// append-only storage for every directory path computed during the
+	// walk, shared across all workers. Lock-free/CAS-based (stores.StringStore),
+	// since every worker now writes into the same instance.
+	paths *stores.StringStore
+	// shared ancestor-chain storage for symlink-cycle detection, one
+	// instance for the whole pool. nil when followLinks is off.
+	ancestors *stores.GenericStore[ancestorEntry]
 }
 
 // NewWalkman builds a Walkman with GOMAXPROCS-based pool sizing.
@@ -187,14 +183,13 @@ func NewWalkmanWithConfig(
 		},
 	}
 
-	w.workers = make([]workerState, pc.PoolSize)
+	w.paths = stores.NewStringStore()
 	if w.conf.followLinks {
-		for i := range w.workers {
-			w.workers[i].ancestors = newAncestorStore()
-		}
+		w.ancestors = newAncestorStore()
 	}
+
+	w.workers = make([]workerState, pc.PoolSize)
 	for i := range w.workers {
-		w.workers[i].paths = stores.NewStringStore()
 		w.workers[i].results = newResultArena(0, 0)
 		w.workers[i].spawnBuf = make([]walkItem, 8)
 	}
@@ -218,7 +213,6 @@ func NewWalkmanWithConfig(
 	return w
 }
 
-
 func (w *Walkman) visit(
 	_ context.Context,
 	workerID int,
@@ -226,15 +220,14 @@ func (w *Walkman) visit(
 	res chan<- DirBatch,
 	spawn func(...walkItem),
 ) error {
-	path := item.path
 	worker := &w.workers[workerID]
 	mark := worker.results.getEntryMark()
-	err := readDirRaw(path, worker.buf[:], nil, w.conf.skipSet,
+	err := readDirRaw(item.path, worker.buf[:], nil, w.conf.skipSet,
 		func(name []byte, dType uint8, ino uint64) error {
 			worker.results.storeEntry(
 				Entry{
 					parentDir: item.path,
-					name:      worker.paths.StoreBytes(name),
+					name:      w.paths.StoreBytes(name),
 					ino:       ino,
 					typ:       dType,
 				})
@@ -242,12 +235,12 @@ func (w *Walkman) visit(
 		})
 	if err != nil {
 		// the directory itself couldn't be read. One DirErr, not a pool-wide abort.
-		res <- DirBatch{dir: item.path, Errs: []DirErr{{name: item.path, err: err}}}
+		res <- DirBatch{Dir: item.path, Errs: []DirErr{{Name: item.path, Err: err}}}
 		return nil
 	}
 
 	entries := worker.results.sliceEntry(mark)
-	res <- DirBatch{dir: item.path, Entries: entries}
+	res <- DirBatch{Dir: item.path, Entries: entries}
 
 	if w.conf.maxDepth != 0 && item.depth+1 > w.conf.maxDepth {
 		return nil
@@ -259,7 +252,7 @@ func (w *Walkman) visit(
 		if entries[i].Type().Type().IsDir() {
 			// allocate the full path to the subdir and store it in the arena
 			spawnBuf = append(spawnBuf, walkItem{
-				path:  worker.paths.StorePath(item.path, entries[i].name),
+				path:  w.paths.StorePath(item.path, entries[i].name),
 				depth: item.depth + 1,
 			})
 		}
@@ -392,7 +385,7 @@ func (w *Walkman) Walk(root string) <-chan DirBatch {
 
 	// TODO: no followlinks handling for now
 	w.pool.Submit(walkItem{
-		path:  w.workers[0].paths.StoreString(root),
+		path:  w.paths.StoreString(root),
 		depth: 1,
 	})
 	return w.pool.Run()
