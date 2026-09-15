@@ -271,7 +271,7 @@ func (w *Walkman) visit(
 	spawnBuf := worker.spawnBuf[:0]
 
 	for i := range entries {
-		if entries[i].Type().Type().IsDir() {
+		if entries[i].IsDir() {
 			// allocate the full path to the subdir and store it in the arena
 			spawnBuf = append(spawnBuf, walkItem{
 				path:  worker.paths.StorePathZ(item.path, entries[i].name),
