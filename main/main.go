@@ -112,7 +112,7 @@ func main() {
 		var total time.Duration
 		min := time.Duration(1<<63 - 1)
 		var max time.Duration
-		for i := 0; i < n; i++ {
+		for range n {
 			f, d, l, e, elapsed := runOnce()
 			lastFiles, lastDirs, lastLinks, lastErrs = f, d, l, e
 			durations = append(durations, elapsed)
