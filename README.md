@@ -301,11 +301,10 @@ go test ./...              # full suite
 go test -bench=. -benchmem ./...
 ```
 
-### What's wrong with `go test -race`
 
-Running `go test -race` on high-concurrency configurations (such as `TestWalk_ConsistentAcrossPoolSizes` under heavy oversubscription with tiny buffers) may occasionally report a data race inside the underlying `workstealpool` library.
-This is a known, benign artifact of `workstealpool`'s unboxed Chase-Lev circular ring buffer: when the ring buffer wraps around, ThreadSanitizer flags the physical slot reuse as a race on unboxed struct values (`walkItem`), even though the slot is only reused after the thief has already finished with it.
-`walkman`'s internal data structures (including path arena storage, cycle detection sets, and error lists) are completely race-free. For a full technical explanation of the lock-free deque mechanics, see [workstealpool/README.md](https://github.com/PAKIWASI/workstealpool#known-limitation-benign-race-under--race).
+### What's wrong with `go test -race`
+ 
+Running `go test -race` on high-concurrency configurations (such as `TestWalk_ConsistentAcrossPoolSizes` under heavy oversubscription with tiny buffers) may occasionally report a data race inside the underlying `workstealpool` library, with no accompanying count-mismatch failure. This comes from `workstealpool`'s unboxed Chase-Lev circular ring buffer: when the ring buffer wraps around, a physical slot gets reused, and ThreadSanitizer flags that reuse as a race on unboxed struct values (`walkItem`) because Go doesn't expose the C11 relaxed-atomic loads the algorithm's correctness argument actually depends on. In practice a losing reader's value is discarded and never observed, and extensive stress testing backs that up. But that's empirical confidence earned through testing, not a guarantee the Go memory model formally makes. See [workstealpool/README.md](https://github.com/PAKIWASI/workstealpool#known-limitation-benign-race-under--race) for the full technical explanation.
 
 
 ## Roadmap
